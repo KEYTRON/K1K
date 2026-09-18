@@ -1,0 +1,152 @@
+//! System call dispatcher and user-memory access helpers.
+
+use alloc::vec::Vec;
+use x86_64::VirtAddr;
+
+use crate::arch::x86_64::interrupts as irq;
+use crate::ipc::{IpcError, Message};
+use crate::mm::pmm::{FRAME_SIZE, phys_to_virt};
+use crate::obj::{Object, Rights};
+use crate::{klog, sched};
+
+pub const SYS_LOG: u64 = 0;
+pub const SYS_EXIT: u64 = 1;
+pub const SYS_YIELD: u64 = 2;
+pub const SYS_SLEEP: u64 = 3;
+pub const SYS_SEND: u64 = 4;
+pub const SYS_RECV: u64 = 5;
+pub const SYS_INFO: u64 = 6;
+
+pub const EPERM: i64 = -1;
+pub const EAGAIN: i64 = -2;
+pub const EFAULT: i64 = -3;
+pub const EINVAL: i64 = -4;
+pub const ENOSYS: i64 = -5;
+
+const USER_TOP: u64 = 0x0000_8000_0000_0000;
+const MAX_LOG: u64 = 4096;
+
+fn user_range_ok(ptr: u64, len: u64) -> bool {
+    len <= MAX_LOG && ptr.checked_add(len).is_some_and(|end| end <= USER_TOP)
+}
+
+/// Translate a user virtual address through the current task's page tables.
+fn translate_user(va: u64) -> Option<u64> {
+    sched::with_current(|t| t.addr_space.as_ref()?.translate(VirtAddr::new(va)).map(|p| p.as_u64()))
+}
+
+fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, i64> {
+    if !user_range_ok(ptr, len) {
+        return Err(EFAULT);
+    }
+    let mut out = Vec::with_capacity(len as usize);
+    let mut va = ptr;
+    let end = ptr + len;
+    while va < end {
+        let pa = translate_user(va).ok_or(EFAULT)?;
+        let chunk = (FRAME_SIZE - (va % FRAME_SIZE)).min(end - va) as usize;
+        let src = phys_to_virt(x86_64::PhysAddr::new(pa)).as_ptr::<u8>();
+        out.extend_from_slice(unsafe { core::slice::from_raw_parts(src, chunk) });
+        va += chunk as u64;
+    }
+    Ok(out)
+}
+
+fn copy_to_user(ptr: u64, data: &[u8]) -> Result<(), i64> {
+    if !user_range_ok(ptr, data.len() as u64) {
+        return Err(EFAULT);
+    }
+    let mut off = 0usize;
+    while off < data.len() {
+        let va = ptr + off as u64;
+        let pa = translate_user(va).ok_or(EFAULT)?;
+        let chunk = (FRAME_SIZE - (va % FRAME_SIZE)) as usize;
+        let chunk = chunk.min(data.len() - off);
+        let dst = phys_to_virt(x86_64::PhysAddr::new(pa)).as_mut_ptr::<u8>();
+        unsafe { core::ptr::copy_nonoverlapping(data[off..].as_ptr(), dst, chunk) };
+        off += chunk;
+    }
+    Ok(())
+}
+
+fn words_to_bytes(words: &[u64]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+fn sys_log(ptr: u64, len: u64) -> i64 {
+    match copy_from_user(ptr, len) {
+        Ok(bytes) => {
+            let name = sched::with_current(|t| t.name);
+            let s = core::str::from_utf8(&bytes).unwrap_or("<invalid utf-8>");
+            klog!(name, "{}", s);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+fn sys_send(slot: u64, w0: u64, w1: u64, w2: u64) -> i64 {
+    let ep = sched::with_current(|t| {
+        t.caps.lookup(slot as u32, Rights::SEND).map(|c| match &c.object {
+            Object::Endpoint(ep) => ep.clone(),
+        })
+    });
+    let Some(ep) = ep else { return EPERM };
+    let msg = Message {
+        sender: sched::current_id(),
+        words: [w0, w1, w2, 0],
+    };
+    match ep.send(msg) {
+        Ok(()) => 0,
+        Err(IpcError::QueueFull) => EAGAIN,
+    }
+}
+
+fn sys_recv(slot: u64, buf: u64) -> i64 {
+    let ep = sched::with_current(|t| {
+        t.caps.lookup(slot as u32, Rights::RECV).map(|c| match &c.object {
+            Object::Endpoint(ep) => ep.clone(),
+        })
+    });
+    let Some(ep) = ep else { return EPERM };
+    if !user_range_ok(buf, 32) {
+        return EFAULT;
+    }
+    let msg = ep.recv();
+    match copy_to_user(buf, &words_to_bytes(&msg.words)) {
+        Ok(()) => msg.sender as i64,
+        Err(e) => e,
+    }
+}
+
+fn sys_info(buf: u64) -> i64 {
+    let words = [irq::uptime_ms(), sched::current_id() as u64];
+    match copy_to_user(buf, &words_to_bytes(&words)) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    match nr {
+        SYS_LOG => sys_log(a0, a1),
+        SYS_EXIT => sched::exit_current(a0 as i64),
+        SYS_YIELD => {
+            sched::yield_now();
+            0
+        }
+        SYS_SLEEP => {
+            sched::sleep_ms(a0.min(60_000));
+            0
+        }
+        SYS_SEND => sys_send(a0, a1, a2, a3),
+        SYS_RECV => sys_recv(a0, a1),
+        SYS_INFO => sys_info(a0),
+        _ => {
+            let name = sched::with_current(|t| t.name);
+            klog!("sys", "task '{}' invoked unknown syscall {}", name, nr);
+            ENOSYS
+        }
+    }
+}

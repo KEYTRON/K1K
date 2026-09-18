@@ -5,6 +5,7 @@ pub mod interrupts;
 pub mod pic;
 pub mod pit;
 pub mod serial;
+pub mod syscall;
 
 use core::arch::asm;
 

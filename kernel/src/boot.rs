@@ -2,8 +2,8 @@
 //! bootloader can find them; the markers bound the scan region.
 
 use limine::request::{
-    BootloaderInfoRequest, ExecutableAddressRequest, FramebufferRequest, HhdmRequest,
-    MemmapRequest, StackSizeRequest,
+    BootloaderInfoRequest, ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
+    HhdmRequest, MemmapRequest, StackSizeRequest,
 };
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
@@ -45,6 +45,18 @@ pub static EXEC_ADDR: ExecutableAddressRequest = ExecutableAddressRequest::new()
 #[unsafe(link_section = ".requests")]
 pub static BOOTLOADER_INFO: BootloaderInfoRequest = BootloaderInfoRequest::new();
 
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
 pub fn hhdm_offset() -> u64 {
     HHDM.response().expect("limine: no HHDM response").offset
+}
+
+pub fn cmdline() -> &'static str {
+    CMDLINE.response().map(|c| c.cmdline()).unwrap_or("")
+}
+
+pub fn cmdline_has(flag: &str) -> bool {
+    cmdline().split_whitespace().any(|f| f == flag)
 }
