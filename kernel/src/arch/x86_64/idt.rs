@@ -29,9 +29,7 @@ pub fn init() {
         idt.segment_not_present.set_handler_fn(segment_not_present);
         idt.stack_segment_fault.set_handler_fn(stack_segment);
         idt.general_protection_fault.set_handler_fn(general_protection);
-        idt.page_fault
-            .set_handler_fn(page_fault)
-            .set_stack_index(gdt::PAGE_FAULT_IST_INDEX);
+        idt.page_fault.set_handler_fn(page_fault);
         idt.x87_floating_point.set_handler_fn(x87_fp);
         idt.alignment_check.set_handler_fn(alignment_check);
         idt.machine_check.set_handler_fn(machine_check);

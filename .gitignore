@@ -5,6 +5,4 @@
 *.iso
 *.hdd
 *.o
-*.bin
-!tools/*.bin
 /user/build/

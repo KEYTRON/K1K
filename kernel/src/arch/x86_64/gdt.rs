@@ -6,7 +6,6 @@ use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector
 use x86_64::structures::tss::TaskStateSegment;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
-pub const PAGE_FAULT_IST_INDEX: u16 = 1;
 
 const IST_STACK_SIZE: usize = 32 * 1024;
 
@@ -14,7 +13,6 @@ const IST_STACK_SIZE: usize = 32 * 1024;
 struct Stack([u8; IST_STACK_SIZE]);
 
 static mut DF_STACK: Stack = Stack([0; IST_STACK_SIZE]);
-static mut PF_STACK: Stack = Stack([0; IST_STACK_SIZE]);
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
 
@@ -41,7 +39,6 @@ pub fn init() {
     unsafe {
         let tss = &mut *addr_of_mut!(TSS);
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_top(addr_of_mut!(DF_STACK));
-        tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = stack_top(addr_of_mut!(PF_STACK));
 
         let gdt = &mut *addr_of_mut!(GDT);
         let kernel_code = gdt.append(Descriptor::kernel_code_segment());

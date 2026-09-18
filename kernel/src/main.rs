@@ -52,7 +52,27 @@ unsafe extern "C" fn kmain() -> ! {
     x86_64::instructions::interrupts::int3();
     klog!("cpu", "breakpoint trap returned OK");
 
-    klog!("k1k", "milestone 1 reached: boot + console + traps");
+    mm::init();
+    {
+        let st = mm::pmm::stats();
+        klog!("pmm", "usable {} MiB, free {} MiB", st.total_usable_kib / 1024, st.free_kib / 1024);
+        let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for i in 0..100_000u64 {
+            v.push(i * 3);
+        }
+        let b = alloc::boxed::Box::new([7u8; 4096]);
+        let (used, free) = mm::heap::stats();
+        klog!("heap", "alloc ok: vec[99999]={} box[0]={} used={} KiB free={} KiB", v[99_999], b[0], used / 1024, free / 1024);
+        drop(v);
+        drop(b);
+        let asp = mm::vmm::AddressSpace::new().expect("address space");
+        klog!("vmm", "user address space created, cr3={:#x}", asp.cr3().start_address());
+        drop(asp);
+        let st = mm::pmm::stats();
+        klog!("pmm", "after teardown: free {} MiB", st.free_kib / 1024);
+    }
+
+    klog!("k1k", "milestone 2 reached: pmm + vmm + heap");
     arch::x86_64::qemu_exit(0x10);
 }
 
