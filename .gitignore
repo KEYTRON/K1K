@@ -1,0 +1,10 @@
+/target/
+/kernel/target/
+/build/
+/third_party/limine/
+*.iso
+*.hdd
+*.o
+*.bin
+!tools/*.bin
+/user/build/
