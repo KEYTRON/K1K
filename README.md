@@ -31,10 +31,16 @@ isolated, restartable services.
 - Preemptive round-robin scheduler (LAPIC timer @ 1 kHz, 10 ms quantum),
   kernel threads, sleep/block/wake.
 - Capability tables (`object + rights`, slot-indexed) and synchronous message
-  endpoints with direct hand-off to a blocked receiver.
+  endpoints with direct hand-off to a blocked receiver. A message can carry a
+  capability (rights ∩ mask, `GRANT` required) — the only way authority moves
+  between tasks.
+- Memory objects: shareable sets of frames that tasks create, hand over as
+  capabilities and map into their own address space (`MAP_READ`/`MAP_WRITE`).
 - Ring-3 tasks with `syscall`/`sysret`; syscalls: `log`, `exit`, `yield`,
-  `sleep`, `send`, `recv`, `info`. All registers except `rax/rcx/r11` are
-  preserved across a syscall.
+  `sleep`, `send`, `recv`, `info`, `send_cap`, `cap_drop`, `mem_create`,
+  `mem_map`. All registers except `rax/rcx/r11` are preserved across a syscall.
+- PCI configuration-space enumeration at boot (drivers themselves will live in
+  ring 3).
 - Static ELF64 loader: services are ordinary Rust `no_std` programs built
   against the `k1k-rt` runtime crate (`user/`), with R/RX/RW segment
   permissions applied per `PT_LOAD`.
@@ -42,8 +48,9 @@ isolated, restartable services.
   from their image (with backoff).
 - Services shipped in the image: `kbd` — the PS/2 keyboard driver running in
   ring 3 (the kernel only forwards scancodes into an endpoint), `hello`,
-  `ping`/`pong` over IPC endpoints, and `flaky` — which dereferences NULL every
-  third iteration and is brought back without a reboot.
+  `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
+  allocates and grants to `ping` as a capability — and `flaky`, which
+  dereferences NULL every third iteration and is brought back without a reboot.
 
 ```
 [ flaky] about to dereference NULL...
@@ -96,11 +103,9 @@ limine.conf       bootloader configuration
 ## Roadmap (short)
 
 - SMP bring-up (Limine MP), per-CPU state, HPET/TSC clock.
-- Memory-object capabilities and shared-memory IPC for bulk data; capability
-  transfer over endpoints; asynchronous notifications.
-- More drivers out of the kernel: PCI enumeration, AHCI/virtio, a VFS server,
-  IRQ delivery to ring-3 drivers through endpoints.
-- Capability derivation/revocation syscalls; an allocator for `k1k-rt`.
+- Asynchronous notifications; IRQ and PCI-device capabilities so ring-3
+  drivers can own hardware; AHCI/virtio drivers and a VFS server.
+- Capability revocation; an allocator for `k1k-rt`.
 
 ## License
 

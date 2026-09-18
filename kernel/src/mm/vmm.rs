@@ -1,6 +1,8 @@
 //! Virtual memory: kernel page tables (inherited from Limine, extended in
 //! place) and per-task user address spaces that share the kernel half.
 
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::MapToError;
@@ -11,6 +13,7 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 use super::pmm::{self, GlobalFrameAllocator, phys_to_virt};
+use crate::obj::MemoryObject;
 
 pub use x86_64::structures::paging::PageTableFlags as Flags;
 
@@ -110,10 +113,21 @@ pub fn map_mmio(phys: PhysAddr, len: u64) {
     );
 }
 
+/// Where shared memory objects get mapped in user space (grows upward).
+const USER_MMAP_BASE: u64 = 0x0000_0010_0000_0000;
+
+struct SharedMapping {
+    start: VirtAddr,
+    pages: usize,
+    _object: Arc<MemoryObject>,
+}
+
 /// A user address space. The kernel half (PML4 entries 256..512) is shared with
 /// the kernel page tables by pointing at the same lower-level tables.
 pub struct AddressSpace {
     pml4: PhysFrame,
+    shared: Vec<SharedMapping>,
+    mmap_next: u64,
 }
 
 impl AddressSpace {
@@ -124,7 +138,55 @@ impl AddressSpace {
         for i in 256..512 {
             dst[i] = PageTableEntry::from(src[i].clone());
         }
-        Some(Self { pml4 })
+        Some(Self {
+            pml4,
+            shared: Vec::new(),
+            mmap_next: USER_MMAP_BASE,
+        })
+    }
+
+    /// Map a shared memory object's frames at a fresh address; the frames stay
+    /// owned by the object and are not freed with this address space.
+    pub fn map_shared(&mut self, obj: Arc<MemoryObject>, writable: bool) -> Option<VirtAddr> {
+        let start = VirtAddr::new(self.mmap_next);
+        let pages = obj.pages();
+        let mut flags =
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+        if writable {
+            flags |= PageTableFlags::WRITABLE;
+        }
+        let mut mapper = mapper_for(self.pml4);
+        let mut alloc = GlobalFrameAllocator;
+        for (i, frame) in obj.frames().iter().enumerate() {
+            let page = Page::containing_address(start + (i as u64) * pmm::FRAME_SIZE);
+            unsafe {
+                mapper
+                    .map_to(page, *frame, flags, &mut alloc)
+                    .ok()?
+                    .ignore();
+            }
+        }
+        // Leave a guard page between mappings.
+        self.mmap_next += (pages as u64 + 1) * pmm::FRAME_SIZE;
+        self.shared.push(SharedMapping {
+            start,
+            pages,
+            _object: obj,
+        });
+        Some(start)
+    }
+
+    fn unmap_shared(&mut self) {
+        let mut mapper = mapper_for(self.pml4);
+        for m in self.shared.drain(..) {
+            for i in 0..m.pages {
+                let page: Page<Size4KiB> =
+                    Page::containing_address(m.start + (i as u64) * pmm::FRAME_SIZE);
+                if let Ok((_, flush)) = mapper.unmap(page) {
+                    flush.ignore();
+                }
+            }
+        }
     }
 
     pub fn cr3(&self) -> PhysFrame {
@@ -230,6 +292,7 @@ fn free_table_recursive(frame: Option<PhysFrame>, level: u8) {
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         assert!(!self.is_current(), "dropping the active address space");
+        self.unmap_shared();
         self.free_user_half();
         pmm::free_frame(self.pml4);
     }

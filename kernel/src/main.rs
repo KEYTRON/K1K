@@ -115,6 +115,7 @@ unsafe extern "C" fn kmain() -> ! {
     arch::x86_64::interrupts::init();
     arch::x86_64::interrupts::enable();
     klog!("irq", "interrupts on");
+    arch::x86_64::pci::init();
     klog!("sys", "syscall/sysret enabled");
 
     let ep = ipc::Endpoint::new();
@@ -209,11 +210,8 @@ extern "C" fn kthread_ipc_client(ep_raw: u64) {
     let me = sched::current_id();
     for i in 0..3u64 {
         sched::sleep_ms(200);
-        ep.send(ipc::Message {
-            sender: me,
-            words: [i, i * 10, 0xC0FFEE, 0],
-        })
-        .unwrap();
+        ep.send(ipc::Message::new(me, [i, i * 10, 0xC0FFEE, 0]))
+            .unwrap();
     }
 }
 

@@ -17,7 +17,23 @@ pub mod sys {
     pub const SEND: u64 = 4;
     pub const RECV: u64 = 5;
     pub const INFO: u64 = 6;
+    pub const SEND_CAP: u64 = 7;
+    pub const CAP_DROP: u64 = 8;
+    pub const MEM_CREATE: u64 = 9;
+    pub const MEM_MAP: u64 = 10;
 }
+
+/// Capability rights bits, as understood by the kernel.
+pub mod rights {
+    pub const SEND: u32 = 1 << 0;
+    pub const RECV: u32 = 1 << 1;
+    pub const GRANT: u32 = 1 << 2;
+    pub const MAP_READ: u32 = 1 << 3;
+    pub const MAP_WRITE: u32 = 1 << 4;
+}
+
+/// Word 3 of a received message when no capability was attached.
+pub const NO_CAP: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
@@ -27,6 +43,7 @@ pub enum Error {
     Fault = -3,
     Inval = -4,
     NoSys = -5,
+    NoMem = -6,
     Unknown = -1000,
 }
 
@@ -38,6 +55,7 @@ impl Error {
             -3 => Error::Fault,
             -4 => Error::Inval,
             -5 => Error::NoSys,
+            -6 => Error::NoMem,
             _ => Error::Unknown,
         }
     }
@@ -97,10 +115,25 @@ pub struct Cap(pub u32);
 pub struct Message {
     pub sender: u32,
     pub words: [u64; 4],
+    /// Capability that arrived with the message, already in our table.
+    pub cap: Option<Cap>,
 }
 
 pub fn send(cap: Cap, w0: u64, w1: u64, w2: u64) -> Result<()> {
     check(syscall(sys::SEND, cap.0 as u64, w0, w1, w2)).map(|_| ())
+}
+
+/// Send `w0` together with a copy of `what`, restricted to `rights`.
+/// Requires `GRANT` on `what`.
+pub fn send_cap(ep: Cap, what: Cap, rights: u32, w0: u64) -> Result<()> {
+    check(syscall(
+        sys::SEND_CAP,
+        ep.0 as u64,
+        what.0 as u64,
+        rights as u64,
+        w0,
+    ))
+    .map(|_| ())
 }
 
 pub fn recv(cap: Cap) -> Result<Message> {
@@ -112,10 +145,26 @@ pub fn recv(cap: Cap) -> Result<Message> {
         0,
         0,
     ))?;
+    let cap = (words[3] != NO_CAP).then(|| Cap(words[3] as u32));
     Ok(Message {
         sender: sender as u32,
         words,
+        cap,
     })
+}
+
+pub fn cap_drop(cap: Cap) -> Result<()> {
+    check(syscall(sys::CAP_DROP, cap.0 as u64, 0, 0, 0)).map(|_| ())
+}
+
+/// Allocate `pages` zeroed pages as a shareable memory object.
+pub fn mem_create(pages: usize) -> Result<Cap> {
+    check(syscall(sys::MEM_CREATE, pages as u64, 0, 0, 0)).map(|s| Cap(s as u32))
+}
+
+/// Map a memory object into our address space; returns its base address.
+pub fn mem_map(cap: Cap, writable: bool) -> Result<*mut u8> {
+    check(syscall(sys::MEM_MAP, cap.0 as u64, writable as u64, 0, 0)).map(|va| va as *mut u8)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

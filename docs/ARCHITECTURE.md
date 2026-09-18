@@ -88,7 +88,9 @@ interrupts), so nested traps and preemption inside syscalls just work.
 ## Objects, capabilities, IPC
 
 ```
-Task ── CapTable ── [slot] ── Capability { object: Endpoint, rights: SEND|RECV }
+Task ── CapTable ── [slot] ── Capability { object, rights }
+                                 object: Endpoint | Memory
+                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE
 ```
 
 `Endpoint` (`ipc/mod.rs`) is a synchronous message channel carrying
@@ -96,6 +98,19 @@ Task ── CapTable ── [slot] ── Capability { object: Endpoint, rights:
 on the endpoint the message is written straight into its inbox and it is
 woken; otherwise it is queued (bounded, `EAGAIN` when full). `recv` blocks
 until a message arrives.
+
+A message may carry one capability (`send_cap`). The sender must hold `GRANT`
+on it; the copy the receiver gets is `rights ∩ mask` and is inserted into the
+receiver's table on `recv`, which reports the new slot in word 3 (`NO_CAP` =
+`u64::MAX` when nothing was attached). This is the only way authority moves
+between tasks — there is no global namespace to look objects up in.
+
+`MemoryObject` (`obj/mod.rs`) is a set of physical frames. `mem_create`
+allocates one (the creator gets `MAP_READ|MAP_WRITE|GRANT`), `mem_map` maps it
+into the caller's address space at a kernel-chosen address above
+`0x10_0000_0000` (read-only unless the capability has `MAP_WRITE`). Frames go
+back to the PMM when the last capability and the last mapping are gone;
+tearing down an address space unmaps shared pages without freeing them.
 
 The keyboard IRQ is the first "driver as a message source": the handler pushes
 scancodes into a kernel-owned endpoint; the `kbd` service holds the only
@@ -132,11 +147,15 @@ wrappers in `user/rt` (`k1k-rt`).
 | 2 | `yield` | — | 0 |
 | 3 | `sleep` | `ms` | 0 |
 | 4 | `send` | `slot, w0, w1, w2` | 0, `EPERM`, `EAGAIN` |
-| 5 | `recv` | `slot, buf[4×u64]` | sender task id, `EPERM`, `EFAULT` |
+| 5 | `recv` | `slot, buf[4×u64]` (word 3 = received cap slot or `NO_CAP`) | sender task id, `EPERM`, `EFAULT` |
 | 6 | `info` | `buf[2×u64]` → `uptime_ms, task_id` | 0 |
+| 7 | `send_cap` | `ep_slot, cap_slot, rights_mask, w0` | 0, `EPERM`, `EAGAIN` |
+| 8 | `cap_drop` | `slot` | 0, `EINVAL` |
+| 9 | `mem_create` | `pages` (1..=1024) | new slot, `EINVAL`, `ENOMEM` |
+| 10 | `mem_map` | `slot, writable` | base address, `EPERM`, `ENOMEM` |
 
-Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4` (reserved),
-`ENOSYS = -5`.
+Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
+`ENOSYS = -5`, `ENOMEM = -6`.
 
 User pointers are validated against the lower half and translated through the
 task's own page tables before the kernel touches them.

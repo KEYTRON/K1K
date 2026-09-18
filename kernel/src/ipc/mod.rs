@@ -1,20 +1,33 @@
 //! Synchronous message-passing endpoints — the only way tasks talk to each
-//! other or to the kernel's device services.
+//! other or to the kernel's device services. A message may carry one
+//! capability, which is how authority is delegated between tasks.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::instructions::interrupts;
 
+use crate::obj::Capability;
 use crate::sched::{self, task::TaskId};
 
 pub const MSG_WORDS: usize = 4;
 const QUEUE_LIMIT: usize = 64;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Message {
     pub sender: TaskId,
     pub words: [u64; MSG_WORDS],
+    pub cap: Option<Capability>,
+}
+
+impl Message {
+    pub fn new(sender: TaskId, words: [u64; MSG_WORDS]) -> Self {
+        Self {
+            sender,
+            words,
+            cap: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -44,26 +57,31 @@ impl Endpoint {
     pub fn send(&self, msg: Message) -> Result<(), IpcError> {
         interrupts::without_interrupts(|| {
             let mut inner = self.inner.lock();
+            let mut pending = Some(msg);
             while let Some(rx) = inner.receivers.pop_front() {
-                let delivered = sched::with_task(rx, |t| {
+                let msg = pending.take().unwrap();
+                let leftover = sched::with_task(rx, |t| {
                     if t.state == sched::task::State::Blocked {
                         t.ipc_inbox = Some(msg);
-                        true
+                        None
                     } else {
-                        false
+                        Some(msg)
                     }
                 })
-                .unwrap_or(false);
-                if delivered {
-                    drop(inner);
-                    sched::wake(rx);
-                    return Ok(());
+                .unwrap_or(None);
+                match leftover {
+                    None => {
+                        drop(inner);
+                        sched::wake(rx);
+                        return Ok(());
+                    }
+                    Some(m) => pending = Some(m),
                 }
             }
             if inner.queue.len() >= QUEUE_LIMIT {
                 return Err(IpcError::QueueFull);
             }
-            inner.queue.push_back(msg);
+            inner.queue.push_back(pending.take().unwrap());
             Ok(())
         })
     }
@@ -110,9 +128,6 @@ pub fn keyboard_endpoint() -> Arc<Endpoint> {
 
 pub fn on_keyboard(scancode: u8) {
     if let Some(ep) = KEYBOARD_EP.lock().as_ref() {
-        let _ = ep.send(Message {
-            sender: 0,
-            words: [scancode as u64, 0, 0, 0],
-        });
+        let _ = ep.send(Message::new(0, [scancode as u64, 0, 0, 0]));
     }
 }
