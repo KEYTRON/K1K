@@ -26,7 +26,10 @@ isolated, restartable services.
   the offending task.
 - Physical memory (bitmap PMM over the Limine memory map), kernel page mapping,
   per-task user address spaces sharing the kernel half, kernel heap.
-- Preemptive round-robin scheduler (PIT @ 200 Hz), kernel threads, sleep/block/wake.
+- ACPI (RSDP → RSDT/XSDT → MADT), Local APIC timer calibrated against the
+  PIT, I/O APIC routing with MADT interrupt overrides; legacy PICs disabled.
+- Preemptive round-robin scheduler (LAPIC timer @ 1 kHz, 10 ms quantum),
+  kernel threads, sleep/block/wake.
 - Capability tables (`object + rights`, slot-indexed) and synchronous message
   endpoints with direct hand-off to a blocked receiver.
 - Ring-3 tasks with `syscall`/`sysret`; syscalls: `log`, `exit`, `yield`,
@@ -76,7 +79,7 @@ echoes each line you finish with Enter into the log.
 
 ```
 kernel/           Rust kernel crate (x86_64-unknown-none, build-std)
-  src/arch/x86_64 GDT, IDT, PIC/PIT, serial, context switch, syscall entry
+  src/arch/x86_64 GDT, IDT, ACPI, LAPIC/IOAPIC, serial, context switch, syscall entry
   src/mm          pmm (frames), vmm (page tables / address spaces), heap
   src/sched       tasks and the scheduler
   src/obj         capabilities
@@ -92,7 +95,7 @@ limine.conf       bootloader configuration
 
 ## Roadmap (short)
 
-- APIC/IOAPIC + HPET, SMP bring-up.
+- SMP bring-up (Limine MP), per-CPU state, HPET/TSC clock.
 - Memory-object capabilities and shared-memory IPC for bulk data; capability
   transfer over endpoints; asynchronous notifications.
 - More drivers out of the kernel: PCI enumeration, AHCI/virtio, a VFS server,

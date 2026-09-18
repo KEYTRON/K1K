@@ -25,8 +25,24 @@ up 4-level paging with a Higher Half Direct Map (HHDM) of all usable memory,
 masks the PICs/IOAPIC, and jumps to `kmain` with interrupts disabled.
 
 `kmain` order: serial → GDT/TSS → IDT → framebuffer console → PMM → VMM →
-heap → scheduler → IPC → syscall MSRs → PIC/PIT → interrupts on → supervisor →
-services.
+heap → scheduler → IPC → syscall MSRs → ACPI/APIC → interrupts on →
+supervisor → services.
+
+## Interrupts
+
+`arch/x86_64/acpi.rs` takes the RSDP from Limine (a physical address under
+base revision 3, so the tables are mapped into the HHDM on demand), walks the
+RSDT or XSDT and parses the MADT: local APIC address, enabled CPUs, I/O APICs
+and ISA interrupt-source overrides.
+
+`arch/x86_64/apic.rs` enables the BSP's local APIC (spurious vector `0xFF`),
+calibrates its timer against PIT channel 2 (20 ms one-shot, gate on port
+`0x61`) and runs it in periodic mode at `TIMER_HZ` (1000). Every I/O APIC
+redirection entry is masked first; `route_isa_irq` then programs the entry for
+a legacy IRQ, applying polarity/trigger from a MADT override if present. The
+legacy 8259 PICs are remapped away from the exception vectors and fully
+masked. Vectors 32..254 that nothing claimed land in `unexpected_irq`, which
+just acknowledges them.
 
 ## Memory
 
@@ -55,7 +71,8 @@ task's `rsp` is loaded, its registers popped, `ret`. A fresh task's stack is
 pre-filled so that `ret` lands in `task_trampoline`, which enables interrupts
 and calls the entry function.
 
-The scheduler (`sched/mod.rs`) is round-robin with a 4-tick quantum at 200 Hz.
+The scheduler (`sched/mod.rs`) is round-robin with a 10-tick (10 ms) quantum
+at 1000 Hz.
 On each timer tick sleepers whose deadline passed become ready; if the current
 quantum is exhausted and something is ready, `schedule()` runs inside the IRQ
 handler (the interrupted frame stays on that task's kernel stack).

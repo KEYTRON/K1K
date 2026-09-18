@@ -114,11 +114,7 @@ unsafe extern "C" fn kmain() -> ! {
     arch::x86_64::syscall::init();
     arch::x86_64::interrupts::init();
     arch::x86_64::interrupts::enable();
-    klog!(
-        "irq",
-        "PIC remapped, PIT @ {} Hz, interrupts on",
-        arch::x86_64::interrupts::TIMER_HZ
-    );
+    klog!("irq", "interrupts on");
     klog!("sys", "syscall/sysret enabled");
 
     let ep = ipc::Endpoint::new();

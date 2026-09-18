@@ -63,6 +63,53 @@ pub fn map_kernel_pages(
     Ok(())
 }
 
+/// Make physical range `[phys, phys+len)` reachable through the HHDM. Pages
+/// Limine already mapped are left alone; missing ones are added with `extra`.
+fn map_phys_range(phys: PhysAddr, len: u64, extra: PageTableFlags) {
+    let mut mapper = mapper_for(kernel_pml4());
+    let mut alloc = GlobalFrameAllocator;
+    let start = phys.as_u64() & !(pmm::FRAME_SIZE - 1);
+    let end = (phys.as_u64() + len + pmm::FRAME_SIZE - 1) & !(pmm::FRAME_SIZE - 1);
+    let mut p = start;
+    while p < end {
+        let va = phys_to_virt(PhysAddr::new(p));
+        if mapper.translate_addr(va).is_none() {
+            let page = Page::<Size4KiB>::containing_address(va);
+            let frame = PhysFrame::containing_address(PhysAddr::new(p));
+            unsafe {
+                mapper
+                    .map_to(
+                        page,
+                        frame,
+                        PageTableFlags::PRESENT
+                            | PageTableFlags::WRITABLE
+                            | PageTableFlags::GLOBAL
+                            | PageTableFlags::NO_EXECUTE
+                            | extra,
+                        &mut alloc,
+                    )
+                    .expect("map_phys_range")
+                    .flush();
+            }
+        }
+        p += pmm::FRAME_SIZE;
+    }
+}
+
+/// Map firmware tables (ACPI etc.) that base revision 3 leaves out of the HHDM.
+pub fn map_phys_hhdm(phys: PhysAddr, len: u64) {
+    map_phys_range(phys, len, PageTableFlags::empty());
+}
+
+/// Map device registers uncached.
+pub fn map_mmio(phys: PhysAddr, len: u64) {
+    map_phys_range(
+        phys,
+        len,
+        PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH,
+    );
+}
+
 /// A user address space. The kernel half (PML4 entries 256..512) is shared with
 /// the kernel page tables by pointing at the same lower-level tables.
 pub struct AddressSpace {

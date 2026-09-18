@@ -3,7 +3,7 @@
 
 use limine::request::{
     BootloaderInfoRequest, ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
-    HhdmRequest, MemmapRequest, StackSizeRequest,
+    HhdmRequest, MemmapRequest, RsdpRequest, StackSizeRequest,
 };
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
@@ -48,6 +48,11 @@ pub static BOOTLOADER_INFO: BootloaderInfoRequest = BootloaderInfoRequest::new()
 #[used]
 #[unsafe(link_section = ".requests")]
 pub static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+/// Base revision 3: the RSDP address is physical.
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static BOOT_RSDP: RsdpRequest = RsdpRequest::new();
 
 pub fn hhdm_offset() -> u64 {
     HHDM.response().expect("limine: no HHDM response").offset

@@ -37,11 +37,12 @@ pub fn init() {
         idt.machine_check.set_handler_fn(machine_check);
         idt.simd_floating_point.set_handler_fn(simd_fp);
 
+        for v in IRQ_BASE..=254 {
+            idt[v].set_handler_fn(super::interrupts::unexpected_irq);
+        }
         idt[IRQ_TIMER].set_handler_fn(super::interrupts::timer_irq);
         idt[IRQ_KEYBOARD].set_handler_fn(super::interrupts::keyboard_irq);
-        for v in (IRQ_BASE + 2)..=255 {
-            idt[v].set_handler_fn(super::interrupts::spurious_irq);
-        }
+        idt[super::apic::SPURIOUS_VECTOR].set_handler_fn(super::interrupts::spurious_irq);
         idt.load();
     }
 }

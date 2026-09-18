@@ -21,7 +21,7 @@ use task::{State, Task, TaskId};
 
 pub use task::UserEntry;
 
-const QUANTUM_TICKS: u32 = 4;
+const QUANTUM_TICKS: u32 = 10;
 pub const IDLE_ID: TaskId = 0;
 
 pub struct Scheduler {
