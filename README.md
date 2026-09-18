@@ -2,6 +2,16 @@
 
 Language: English (primary) | [Русский](README.ru.md)
 
+[![K1K CI](https://github.com/KEYTRON/K1K/actions/workflows/ci.yml/badge.svg)](https://github.com/KEYTRON/K1K/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/KEYTRON/K1K?include_prereleases&label=release)](https://github.com/KEYTRON/K1K/releases)
+[![K1OS on K1K](https://github.com/KEYTRON/K1OS/actions/workflows/k1os-k1k.yml/badge.svg)](https://github.com/KEYTRON/K1OS/actions/workflows/k1os-k1k.yml)
+
+| Where it boots | Status |
+|----------------|--------|
+| QEMU q35, BIOS (Limine), 4 CPUs, NVMe | CI boot test on every push |
+| QEMU q35, UEFI (OVMF) | verified on every milestone |
+| As the kernel of [K1OS](https://github.com/KEYTRON/K1OS) | CI boot test in the K1OS repo |
+
 K1K is a from-scratch, hybrid, capability-based operating system kernel for
 x86_64, written in Rust (`no_std`). It is **not** a Linux fork and not UNIX-like
 by design: the goal is to take the best ideas from several families —

@@ -2,6 +2,16 @@
 
 Язык: [English (основной)](README.md) | Русский
 
+[![K1K CI](https://github.com/KEYTRON/K1K/actions/workflows/ci.yml/badge.svg)](https://github.com/KEYTRON/K1K/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/KEYTRON/K1K?include_prereleases&label=release)](https://github.com/KEYTRON/K1K/releases)
+[![K1OS on K1K](https://github.com/KEYTRON/K1OS/actions/workflows/k1os-k1k.yml/badge.svg)](https://github.com/KEYTRON/K1OS/actions/workflows/k1os-k1k.yml)
+
+| Где загружается | Статус |
+|-----------------|--------|
+| QEMU q35, BIOS (Limine), 4 CPU, NVMe | boot-тест в CI на каждом пуше |
+| QEMU q35, UEFI (OVMF) | проверяется на каждой вехе |
+| Как ядро [K1OS](https://github.com/KEYTRON/K1OS) | boot-тест в CI репозитория K1OS |
+
 K1K — гибридное ядро ОС с нуля для x86_64, построенное на капабилити и
 написанное на Rust (`no_std`). Это **не** форк Linux и намеренно не UNIX-like:
 цель — взять лучшее из разных семейств:
