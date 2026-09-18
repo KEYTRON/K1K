@@ -1,5 +1,7 @@
 # K1K architecture
 
+Language: English | [Русский](ARCHITECTURE.ru.md)
+
 ## Design goals
 
 1. **A small privileged core.** Only what must run in ring 0 does: scheduling,

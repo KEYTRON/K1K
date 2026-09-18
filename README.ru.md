@@ -47,7 +47,8 @@ K1K — гибридное ядро ОС с нуля для x86_64, постро
 [ flaky] flaky service started
 ```
 
-Архитектура и ABI сисколлов: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Архитектура и ABI сисколлов: [docs/ARCHITECTURE.ru.md](docs/ARCHITECTURE.ru.md)
+([English](docs/ARCHITECTURE.md)).
 
 ## Сборка
 
