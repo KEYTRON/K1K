@@ -30,10 +30,15 @@ isolated, restartable services.
 - Capability tables (`object + rights`, slot-indexed) and synchronous message
   endpoints with direct hand-off to a blocked receiver.
 - Ring-3 tasks with `syscall`/`sysret`; syscalls: `log`, `exit`, `yield`,
-  `sleep`, `send`, `recv`, `info`.
+  `sleep`, `send`, `recv`, `info`. All registers except `rax/rcx/r11` are
+  preserved across a syscall.
+- Static ELF64 loader: services are ordinary Rust `no_std` programs built
+  against the `k1k-rt` runtime crate (`user/`), with R/RX/RW segment
+  permissions applied per `PT_LOAD`.
 - A supervisor thread that reaps dead tasks and re-instantiates crashed services
   from their image (with backoff).
-- Demo services (flat nasm binaries embedded at build time): `hello`,
+- Services shipped in the image: `kbd` — the PS/2 keyboard driver running in
+  ring 3 (the kernel only forwards scancodes into an endpoint), `hello`,
   `ping`/`pong` over IPC endpoints, and `flaky` — which dereferences NULL every
   third iteration and is brought back without a reboot.
 
@@ -51,7 +56,7 @@ syscall ABI.
 ## Building
 
 Requirements: Rust nightly (`rustup` picks it up from `rust-toolchain.toml`),
-`nasm`, `xorriso`, `qemu-system-x86_64`, `make`, `git`.
+`xorriso`, `qemu-system-x86_64`, `make`, `git`.
 
 ```sh
 make            # build kernel + bootable ISO into build/k1k.iso
@@ -60,7 +65,12 @@ make run-uefi   # boot with OVMF
 make test       # headless self-test: exits 0 when the supervisor restarted `flaky`
 ```
 
-The first build clones the Limine binaries into `third_party/limine`.
+The first build clones the Limine binaries into `third_party/limine`. The
+kernel's `build.rs` builds the `user/` workspace and embeds the service ELFs,
+so `make` (or `cargo build` inside `kernel/`) is enough.
+
+Interactive run: `make run`, then type in the QEMU window — the `kbd` service
+echoes each line you finish with Enter into the log.
 
 ## Layout
 
@@ -73,8 +83,9 @@ kernel/           Rust kernel crate (x86_64-unknown-none, build-std)
   src/ipc         endpoints
   src/syscall     dispatcher + user memory access
   src/service     service specs and the supervisor
+  src/loader      static ELF64 loader
   src/console     framebuffer console + logging macros
-user/             ring-3 programs (nasm) and the ABI header user/lib/k1k.inc
+user/             ring-3 workspace: rt/ (k1k-rt runtime), svc/* (services), user.ld
 tools/            ISO builder, font generator
 limine.conf       bootloader configuration
 ```
@@ -82,11 +93,11 @@ limine.conf       bootloader configuration
 ## Roadmap (short)
 
 - APIC/IOAPIC + HPET, SMP bring-up.
-- ELF loader for services, a real user-space runtime.
-- Shared-memory IPC for bulk data; asynchronous notifications.
-- Move drivers out of the kernel: keyboard is already just an IRQ → endpoint;
-  next PCI, AHCI/virtio, a VFS server.
-- Capability derivation/revocation syscalls.
+- Memory-object capabilities and shared-memory IPC for bulk data; capability
+  transfer over endpoints; asynchronous notifications.
+- More drivers out of the kernel: PCI enumeration, AHCI/virtio, a VFS server,
+  IRQ delivery to ring-3 drivers through endpoints.
+- Capability derivation/revocation syscalls; an allocator for `k1k-rt`.
 
 ## License
 

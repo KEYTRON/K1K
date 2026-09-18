@@ -1,0 +1,14 @@
+[package]
+name = "kbd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kbd"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+k1k-rt.workspace = true

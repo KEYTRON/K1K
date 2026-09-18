@@ -5,4 +5,4 @@
 *.iso
 *.hdd
 *.o
-/user/build/
+/user/target/

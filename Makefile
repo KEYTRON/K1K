@@ -17,7 +17,7 @@ else
   KERNEL_ELF = kernel/target/x86_64-unknown-none/debug/k1k
 endif
 
-.PHONY: all kernel iso run run-bios run-uefi test clean distclean limine fmt clippy
+.PHONY: all user kernel iso run run-bios run-uefi test clean distclean limine fmt clippy
 
 all: iso
 
@@ -26,6 +26,11 @@ $(LIMINE)/limine:
 	$(MAKE) -s -C $(LIMINE)
 
 limine: $(LIMINE)/limine
+
+# Ring-3 services live in their own workspace; kernel/build.rs builds them
+# automatically, this target is for working on them in isolation.
+user:
+	cd user && cargo build --release --workspace
 
 kernel:
 	cd kernel && cargo build $(CARGO_PROFILE_FLAG)
@@ -61,12 +66,15 @@ test: test-iso
 
 fmt:
 	cd kernel && cargo fmt
+	cd user && cargo fmt
 
 clippy:
 	cd kernel && cargo clippy
+	cd user && cargo clippy --workspace
 
 clean:
 	cd kernel && cargo clean
+	cd user && cargo clean
 	rm -rf $(BUILD)
 
 distclean: clean

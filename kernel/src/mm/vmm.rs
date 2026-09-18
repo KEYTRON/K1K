@@ -18,7 +18,6 @@ pub use x86_64::structures::paging::PageTableFlags as Flags;
 pub const KERNEL_HEAP_START: u64 = 0xffff_9000_0000_0000;
 /// Top of the canonical lower half; user stacks grow down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_7fff_ffff_0000;
-pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000;
 
 static KERNEL_PML4: Mutex<Option<PhysFrame>> = Mutex::new(None);
 

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "rt",
+    "svc/hello",
+    "svc/flaky",
+    "svc/ping",
+    "svc/pong",
+    "svc/kbd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+k1k-rt = { path = "rt" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = false
+strip = false
+
+[profile.dev]
+panic = "abort"
+opt-level = 1

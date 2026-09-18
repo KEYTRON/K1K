@@ -14,6 +14,7 @@ mod arch;
 mod boot;
 mod console;
 mod ipc;
+mod loader;
 mod mm;
 mod obj;
 mod sched;
@@ -121,7 +122,6 @@ unsafe extern "C" fn kmain() -> ! {
     klog!("sys", "syscall/sysret enabled");
 
     let ep = ipc::Endpoint::new();
-    sched::spawn_kernel("kbd-log", kthread_keyboard_log, 0);
     sched::spawn_kernel("kthread-a", kthread_ticker, 300);
     sched::spawn_kernel(
         "ipc-server",
@@ -198,18 +198,6 @@ extern "C" fn kthread_ticker(period_ms: u64) {
         sched::sleep_ms(period_ms);
     }
     klog!(name, "done, exiting");
-}
-
-/// Consumes the keyboard IRQ endpoint — the driver-as-message-source pattern.
-extern "C" fn kthread_keyboard_log(_: u64) {
-    let ep = ipc::keyboard_endpoint();
-    loop {
-        let m = ep.recv();
-        let sc = m.words[0];
-        if sc & 0x80 == 0 {
-            klog!("kbd", "key down scancode={:#04x}", sc);
-        }
-    }
 }
 
 extern "C" fn kthread_ipc_server(ep_raw: u64) {

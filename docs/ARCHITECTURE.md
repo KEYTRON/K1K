@@ -32,8 +32,8 @@ services.
 
 | Region | Address | Notes |
 |--------|---------|-------|
-| User code | `0x0000_0000_0040_0000` | flat binaries mapped RWX (ELF loader is on the roadmap) |
-| User stack | below `0x0000_7fff_ffff_0000` | 4 pages, NX |
+| User image | from `0x0000_0000_0040_0000` | ELF `PT_LOAD` segments, R / RX / RW per segment flags |
+| User stack | below `0x0000_7fff_ffff_0000` | 16 pages, NX |
 | HHDM | `0xffff_8000_0000_0000` (Limine-provided) | physical memory direct map |
 | Kernel heap | `0xffff_9000_0000_0000` | 16 MiB, mapped at init |
 | Kernel image | `0xffffffff80000000` | |
@@ -81,14 +81,18 @@ woken; otherwise it is queued (bounded, `EAGAIN` when full). `recv` blocks
 until a message arrives.
 
 The keyboard IRQ is the first "driver as a message source": the handler pushes
-scancodes into a kernel-owned endpoint; any task holding a `RECV` capability
-on it is the keyboard driver.
+scancodes into a kernel-owned endpoint; the `kbd` service holds the only
+`RECV` capability on it and is therefore the keyboard driver — scancode
+decoding never runs in ring 0, and if `kbd` crashes the supervisor restarts it.
 
 ## Services and supervision
 
 `service/mod.rs` keeps a table of `ServiceSpec { name, image, grants }`.
-`spawn` builds an `AddressSpace`, maps code and stack, copies the image, creates
-the task and inserts the granted capabilities. `supervisor_main` runs as a
+`spawn` builds an `AddressSpace`, loads the ELF image (`loader/mod.rs`:
+static ELF64, each `PT_LOAD` mapped with permissions derived from `p_flags`,
+addresses validated against the user range), maps a 64 KiB stack, creates the
+task and inserts the granted capabilities. Services are built from the
+`user/` Cargo workspace by `kernel/build.rs` and embedded with `include_bytes!`. `supervisor_main` runs as a
 kernel thread: it reaps `Dead` tasks (freeing stack, address space,
 capabilities) and, for tasks that belonged to a service, re-spawns them. After
 three restarts a linear backoff (200 ms × n, capped at 3 s) is applied.
@@ -100,8 +104,9 @@ exception in ring 0 is a kernel panic.
 ## Syscall ABI (x86_64)
 
 `rax` = number, arguments in `rdi`, `rsi`, `rdx`, `r10`; result in `rax`.
-`rcx` and `r11` are clobbered by the instruction. Negative results are errors.
-Header for nasm programs: `user/lib/k1k.inc`.
+`rcx` and `r11` are clobbered by the instruction itself; every other register
+is preserved by the kernel. Negative results are errors. Rust programs use the
+wrappers in `user/rt` (`k1k-rt`).
 
 | # | Name | Arguments | Result |
 |---|------|-----------|--------|

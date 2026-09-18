@@ -1,0 +1,10 @@
+[package]
+name = "k1k-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "K1K user-space runtime: syscalls, logging, program entry"
+
+[lib]
+test = false
+bench = false

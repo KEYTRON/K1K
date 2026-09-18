@@ -9,13 +9,14 @@ use spin::Mutex;
 use x86_64::VirtAddr;
 
 use crate::arch::x86_64::{context, gdt, interrupts as irq};
-use crate::ipc::Endpoint;
+use crate::ipc::{self, Endpoint};
 use crate::klog;
-use crate::mm::vmm::{AddressSpace, Flags, USER_CODE_BASE, USER_STACK_TOP};
+use crate::loader;
+use crate::mm::vmm::{AddressSpace, Flags, USER_STACK_TOP};
 use crate::obj::{Capability, Object, Rights};
 use crate::sched::{self, UserEntry, task::Task};
 
-const USER_STACK_PAGES: usize = 4;
+const USER_STACK_PAGES: usize = 16;
 const MAX_RESTARTS_BEFORE_BACKOFF: u32 = 3;
 
 pub struct Grant {
@@ -38,10 +39,17 @@ pub struct ServiceState {
 
 pub static SERVICES: Mutex<Vec<ServiceState>> = Mutex::new(Vec::new());
 
-static HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.bin"));
-static FLAKY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/flaky.bin"));
-static PING: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ping.bin"));
-static PONG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pong.bin"));
+macro_rules! image {
+    ($name:literal) => {
+        include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".elf"))
+    };
+}
+
+static HELLO: &[u8] = image!("hello");
+static FLAKY: &[u8] = image!("flaky");
+static PING: &[u8] = image!("ping");
+static PONG: &[u8] = image!("pong");
+static KBD: &[u8] = image!("kbd");
 
 pub fn register(spec: ServiceSpec) -> usize {
     let mut s = SERVICES.lock();
@@ -54,11 +62,19 @@ pub fn register(spec: ServiceSpec) -> usize {
     s.len() - 1
 }
 
-/// Register the built-in demo services and wire their IPC capabilities.
+/// Register the built-in services and wire their IPC capabilities.
 pub fn init_builtin() {
     let req = Endpoint::new();
     let rep = Endpoint::new();
 
+    register(ServiceSpec {
+        name: "kbd",
+        image: KBD,
+        grants: alloc::vec![Grant {
+            endpoint: ipc::keyboard_endpoint(),
+            rights: Rights::RECV,
+        }],
+    });
     register(ServiceSpec {
         name: "hello",
         image: HELLO,
@@ -75,11 +91,11 @@ pub fn init_builtin() {
         grants: alloc::vec![
             Grant {
                 endpoint: req.clone(),
-                rights: Rights::RECV
+                rights: Rights::RECV,
             },
             Grant {
                 endpoint: rep.clone(),
-                rights: Rights::SEND
+                rights: Rights::SEND,
             },
         ],
     });
@@ -89,11 +105,11 @@ pub fn init_builtin() {
         grants: alloc::vec![
             Grant {
                 endpoint: req,
-                rights: Rights::SEND
+                rights: Rights::SEND,
             },
             Grant {
                 endpoint: rep,
-                rights: Rights::RECV
+                rights: Rights::RECV,
             },
         ],
     });
@@ -117,10 +133,18 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
     };
 
     let mut asp = AddressSpace::new()?;
-    let code_pages = image.len().div_ceil(4096).max(1);
-    asp.map_user_range(VirtAddr::new(USER_CODE_BASE), code_pages, Flags::WRITABLE)
-        .ok()?;
-    asp.write_user(VirtAddr::new(USER_CODE_BASE), image);
+    let loaded = match loader::load(&mut asp, image) {
+        Ok(l) => l,
+        Err(e) => {
+            klog!(
+                "superv",
+                "service '{}': cannot load ELF image: {:?}",
+                name,
+                e
+            );
+            return None;
+        }
+    };
     let stack_bottom = USER_STACK_TOP - (USER_STACK_PAGES as u64) * 4096;
     asp.map_user_range(
         VirtAddr::new(stack_bottom),
@@ -132,7 +156,7 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
     let mut t: Box<Task> = Task::new_kernel(0, name, user_task_entry, 0);
     t.addr_space = Some(asp);
     t.user = Some(UserEntry {
-        rip: USER_CODE_BASE,
+        rip: loaded.entry,
         rsp: USER_STACK_TOP - 16,
     });
     t.service = Some(idx);
@@ -160,12 +184,19 @@ extern "C" fn user_task_entry(_: u64) {
 pub fn start_all() {
     let n = SERVICES.lock().len();
     for i in 0..n {
+        let (name, size) = {
+            let s = SERVICES.lock();
+            (s[i].spec.name, s[i].spec.image.len())
+        };
         match spawn(i) {
-            Some(id) => {
-                let name = SERVICES.lock()[i].spec.name;
-                klog!("superv", "started service '{}' as task {}", name, id);
-            }
-            None => klog!("superv", "failed to start service #{}", i),
+            Some(id) => klog!(
+                "superv",
+                "started service '{}' as task {} ({} KiB ELF)",
+                name,
+                id,
+                size / 1024
+            ),
+            None => klog!("superv", "failed to start service '{}'", name),
         }
     }
 }
