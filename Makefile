@@ -36,7 +36,7 @@ limine: $(LIMINE)/limine
 # Ring-3 services live in their own workspace; kernel/build.rs builds them
 # automatically, this target is for working on them in isolation.
 user:
-	cd user && cargo build --release --workspace
+	cd user && cargo build --release --workspace --target-dir $(USER_TARGET)
 
 kernel:
 	cd kernel && cargo build $(CARGO_PROFILE_FLAG)
@@ -52,7 +52,11 @@ test-iso: $(LIMINE)/limine kernel $(TEST_CONF)
 	sh tools/mkiso.sh $(KERNEL_ELF) $(TEST_CONF) $(TEST_ISO)
 
 # FAT disk image: /SVC holds the services fs loads at boot (mtools required).
-USER_BIN = user/target/x86_64-unknown-none/release
+# Where the user workspace builds; override (with K1K_USER_TARGET_DIR for the
+# kernel's build.rs) when the source tree is read-only.
+USER_TARGET ?= $(CURDIR)/user/target
+export K1K_USER_TARGET_DIR = $(USER_TARGET)
+USER_BIN = $(USER_TARGET)/x86_64-unknown-none/release
 DISK_SERVICES = hello flaky
 
 $(DISK): user

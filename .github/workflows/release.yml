@@ -1,0 +1,62 @@
+name: K1K Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)publish
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: [self-hosted, k1lab, k1k]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Build release kernel, ISO and disk image
+        run: |
+          make PROFILE=release iso disk
+          make PROFILE=release test
+
+      - name: Collect artifacts
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p dist
+          cp build/k1k.iso "dist/k1k-${tag}-x86_64.iso"
+          cp build/disk.img "dist/k1k-${tag}-disk-fat16.img"
+          cp kernel/target/x86_64-unknown-none/release/k1k "dist/k1k-${tag}-kernel.elf"
+          cp build/serial.log "dist/k1k-${tag}-autotest.log"
+          (cd dist && sha256sum * > "k1k-${tag}-SHA256SUMS")
+          ls -la dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          notes="K1K ${tag} — hybrid capability-based kernel for K1OS.
+
+          Boot \`k1k-${tag}-x86_64.iso\` (BIOS or UEFI) with the FAT16 disk image
+          attached as an NVMe drive; \`fs\` mounts it and starts the services in /SVC.
+
+          \`\`\`
+          qemu-system-x86_64 -M q35 -m 512M -smp 4 -cdrom k1k-${tag}-x86_64.iso \\
+            -drive file=k1k-${tag}-disk-fat16.img,if=none,format=raw,id=nvme0 \\
+            -device nvme,drive=nvme0,serial=K1K-NVME-0001 -serial stdio
+          \`\`\`
+
+          The autotest log from the release build is attached."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "K1K $tag" --notes "$notes" --prerelease
+          fi

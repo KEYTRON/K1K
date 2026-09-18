@@ -31,10 +31,18 @@ fn main() {
         );
     }
 
+    // Out-of-tree builds (read-only source checkouts) point the user
+    // workspace's target directory elsewhere with K1K_USER_TARGET_DIR.
+    let user_target = env::var("K1K_USER_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| user_dir.join("target"));
+    println!("cargo:rerun-if-env-changed=K1K_USER_TARGET_DIR");
+
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(&user_dir)
-        .args(["build", "--release", "--workspace"])
+        .args(["build", "--release", "--workspace", "--target-dir"])
+        .arg(&user_target)
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_BUILD_RUSTFLAGS")
@@ -49,7 +57,7 @@ fn main() {
         .expect("failed to spawn cargo for the user workspace");
     assert!(status.success(), "building user services failed");
 
-    let bin_dir = user_dir.join("target/x86_64-unknown-none/release");
+    let bin_dir = user_target.join("x86_64-unknown-none/release");
     for s in SERVICES {
         let src = bin_dir.join(s);
         let dst = out.join(format!("{s}.elf"));

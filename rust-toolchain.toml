@@ -1,4 +1,6 @@
 [toolchain]
-channel = "nightly"
+# Pinned so the lab runner and developers build with the same compiler;
+# bump deliberately after checking `make test`.
+channel = "nightly-2026-03-21"
 components = ["rust-src", "rustfmt", "clippy"]
 targets = ["x86_64-unknown-none"]

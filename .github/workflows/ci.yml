@@ -4,39 +4,33 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
+# Runs on the K1 lab runner (see KEYTRON/K1OS ci/runner): Rust nightly,
+# QEMU+KVM, xorriso and mtools are preinstalled there.
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, k1lab, k1k]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: false
 
-      - name: Install host tools
+      - name: Toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xorriso qemu-system-x86 mtools
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src, rustfmt, clippy
-          targets: x86_64-unknown-none
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            kernel
-            user
+          rustup show active-toolchain
+          rustup target list --installed | grep -q x86_64-unknown-none
 
       - name: Check formatting
         run: |
           (cd kernel && cargo fmt --check)
           (cd user && cargo fmt --check)
 
-      - name: Build kernel
+      - name: Build kernel and services
         run: make kernel
 
-      - name: Boot test in QEMU
+      - name: Boot test in QEMU (4 CPUs, NVMe disk)
         run: make test
 
       - name: Upload serial log
