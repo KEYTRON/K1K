@@ -14,7 +14,9 @@ extern crate alloc;
 mod arch;
 mod boot;
 mod console;
+mod ipc;
 mod mm;
+mod obj;
 mod sched;
 
 use core::panic::PanicInfo;
@@ -73,7 +75,53 @@ unsafe extern "C" fn kmain() -> ! {
     }
 
     klog!("k1k", "milestone 2 reached: pmm + vmm + heap");
+
+    sched::init();
+    ipc::init();
+    arch::x86_64::interrupts::init();
+    arch::x86_64::interrupts::enable();
+    klog!("irq", "PIC remapped, PIT @ {} Hz, interrupts on", arch::x86_64::interrupts::TIMER_HZ);
+
+    let ep = ipc::Endpoint::new("demo");
+    sched::spawn_kernel("kthread-a", kthread_ticker, 300);
+    sched::spawn_kernel("kthread-b", kthread_ticker, 500);
+    sched::spawn_kernel("ipc-server", kthread_ipc_server, alloc::sync::Arc::into_raw(ep.clone()) as u64);
+    sched::spawn_kernel("ipc-client", kthread_ipc_client, alloc::sync::Arc::into_raw(ep) as u64);
+
+    let deadline = arch::x86_64::interrupts::uptime_ms() + 2500;
+    while arch::x86_64::interrupts::uptime_ms() < deadline {
+        x86_64::instructions::hlt();
+    }
+    klog!("sched", "{} tasks alive after demo:", sched::task_count());
+    sched::dump();
+    klog!("k1k", "milestone 3 reached: preemptive scheduler + kernel threads + IPC");
     arch::x86_64::qemu_exit(0x10);
+}
+
+extern "C" fn kthread_ticker(period_ms: u64) {
+    let (id, name) = sched::with_current(|t| (t.id, t.name));
+    for i in 1..=4 {
+        klog!(name, "tick {} (task {}) at {} ms", i, id, arch::x86_64::interrupts::uptime_ms());
+        sched::sleep_ms(period_ms);
+    }
+    klog!(name, "done, exiting");
+}
+
+extern "C" fn kthread_ipc_server(ep_raw: u64) {
+    let ep = unsafe { alloc::sync::Arc::from_raw(ep_raw as *const ipc::Endpoint) };
+    for _ in 0..3 {
+        let m = ep.recv();
+        klog!("server", "got {:?} from task {}", m.words, m.sender);
+    }
+}
+
+extern "C" fn kthread_ipc_client(ep_raw: u64) {
+    let ep = unsafe { alloc::sync::Arc::from_raw(ep_raw as *const ipc::Endpoint) };
+    let me = sched::current_id();
+    for i in 0..3u64 {
+        sched::sleep_ms(200);
+        ep.send(ipc::Message { sender: me, words: [i, i * 10, 0xC0FFEE, 0] }).unwrap();
+    }
 }
 
 #[panic_handler]
