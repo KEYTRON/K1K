@@ -26,6 +26,24 @@ pub mod sys {
     pub const MEM_PHYS: u64 = 13;
     pub const DEV_INFO: u64 = 14;
     pub const DEV_MAP: u64 = 15;
+    pub const SPAWN: u64 = 16;
+}
+
+/// Wire protocol of the `blk` block-device service.
+pub mod blkproto {
+    /// Client → blk: attach a DMA buffer (capability attached; page count in
+    /// the high 32 bits of w0, since a capability message carries one word).
+    pub const REGISTER_BUF: u64 = 1;
+    /// Client → blk: where to send replies (endpoint capability attached).
+    pub const SET_REPLY: u64 = 2;
+    /// Client → blk: read `w2` blocks starting at LBA `w1` into the buffer.
+    pub const READ: u64 = 3;
+    /// blk → client: w0 = status (0 = ok), w1 = blocks transferred,
+    /// w2 = block size in bytes.
+    pub const STATUS_OK: u64 = 0;
+    pub const STATUS_ERR: u64 = 1;
+    /// Largest single read, in blocks of 512 bytes (two PRP entries).
+    pub const MAX_BLOCKS: u64 = 16;
 }
 
 /// Capability rights bits, as understood by the kernel.
@@ -36,6 +54,7 @@ pub mod rights {
     pub const MAP_READ: u32 = 1 << 3;
     pub const MAP_WRITE: u32 = 1 << 4;
     pub const DMA: u32 = 1 << 5;
+    pub const SPAWN: u32 = 1 << 6;
 }
 
 /// Word 3 of a received message when no capability was attached.
@@ -240,6 +259,21 @@ pub fn dev_info(cap: Cap) -> Result<DevInfo> {
 /// Map a device's memory BAR (uncached); returns its base address.
 pub fn dev_map(cap: Cap, bar: usize) -> Result<*mut u8> {
     check(syscall(sys::DEV_MAP, cap.0 as u64, bar as u64, 0, 0)).map(|va| va as *mut u8)
+}
+
+/// Start a supervised service from the ELF image in `image` (`size` bytes).
+/// Requires a `Control` capability with `SPAWN`. Returns the new task id.
+pub fn spawn(control: Cap, image: Cap, size: usize, name: &str) -> Result<u32> {
+    let name = &name.as_bytes()[..name.len().min(32)];
+    let packed = (name.as_ptr() as u64 & 0xFFFF_FFFF_FFFF) | (name.len() as u64) << 48;
+    check(syscall(
+        sys::SPAWN,
+        control.0 as u64,
+        image.0 as u64,
+        size as u64,
+        packed,
+    ))
+    .map(|id| id as u32)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

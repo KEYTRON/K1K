@@ -5,7 +5,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SERVICES: &[&str] = &["hello", "flaky", "ping", "pong", "kbd", "blk"];
+/// Services embedded in the kernel image. `hello` and `flaky` are built by the
+/// same workspace but shipped on the disk image and loaded by `fs`.
+const SERVICES: &[&str] = &["ping", "pong", "kbd", "blk", "fs"];
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

@@ -25,7 +25,9 @@ OS generation, not a version 0.x placeholder, hence `1.0.0-alpha` here. K1OS
 today boots a Linux kernel with its own package manager,
 [WARP](https://github.com/KEYTRON/WARP); the plan is to migrate K1OS onto K1K
 step by step (boot → services → WARP-delivered user space) as the kernel grows
-the drivers and the VFS it needs.
+the drivers and the VFS it needs. The first step is in place: the kernel boots
+with only its drivers and `fs` embedded and loads the rest of user space from
+a FAT volume.
 
 ## What works today
 
@@ -52,28 +54,39 @@ the drivers and the VFS it needs.
 - Device capabilities: the kernel enumerates PCI, sizes the BARs and hands a
   function to a driver task, which maps the MMIO BARs itself. The kernel never
   touches the device.
-- Ring-3 tasks with `syscall`/`sysret`; 16 syscalls: `log`, `exit`, `yield`,
+- Ring-3 tasks with `syscall`/`sysret`; 17 syscalls: `log`, `exit`, `yield`,
   `sleep`, `send`, `recv`, `info`, `send_cap`, `cap_drop`, `mem_create`,
-  `mem_map`, `ep_create`, `mem_create_dma`, `mem_phys`, `dev_info`, `dev_map`.
-  All registers except `rax/rcx/r11` are preserved across a syscall.
+  `mem_map`, `ep_create`, `mem_create_dma`, `mem_phys`, `dev_info`, `dev_map`,
+  `spawn`. All registers except `rax/rcx/r11` are preserved across a syscall.
+- User space comes from disk: the kernel image embeds only the drivers and
+  the file-system server; `fs` mounts the FAT volume and `spawn`s every ELF
+  under `/SVC` as a supervised service (a `Control` capability with the
+  `SPAWN` right is the authority to do so). Crashed disk-loaded services are
+  restarted from the retained image like any other.
 - Static ELF64 loader: services are ordinary Rust `no_std` programs built
   against the `k1k-rt` runtime crate (`user/`), with R/RX/RW segment
   permissions applied per `PT_LOAD`.
 - A supervisor thread that reaps dead tasks and re-instantiates crashed services
   from their image (with backoff).
-- Services shipped in the image: `kbd` — the PS/2 keyboard driver running in
+- Services embedded in the kernel image: `kbd` — the PS/2 keyboard driver in
   ring 3 (the kernel only forwards scancodes into an endpoint); `blk` — an
   NVMe driver in ring 3 (admin + I/O queues over DMA pages, polled
-  completions) that identifies the controller and reads the disk; `hello`;
+  completions) serving block reads over IPC into a client-provided DMA
+  buffer; `fs` — read-only FAT12/16/32 on top of `blk`, doubling as init;
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
-  allocates and grants to `ping` as a capability; and `flaky`, which
-  dereferences NULL every third iteration and is brought back without a reboot.
-  A service that exits with code 0 is considered finished and not restarted.
+  grants to `ping` as a capability.
+- Services on the disk (`/SVC`): `hello`, and `flaky`, which dereferences NULL
+  every third iteration and is brought back without a reboot. A service that
+  exits with code 0 is considered finished and not restarted.
 
 ```
 [superv] nvme 00:03.0 handed to service 'blk'
 [   blk] nvme ready: model "QEMU NVMe Ctrl" serial "K1K-NVME-0001", 32768 blocks x 512 B = 16 MiB
-[   blk] sector 0: "K1K disk image v1 - read by the ring-3 nvme driver"
+[   blk] task 10 attached a 64 KiB DMA buffer at 0x1119000
+[    fs] mounted Fat16 volume "K1KDISK": 32481 clusters x 512 B
+[superv] spawned 'hello' from disk as task 13 (41 KiB ELF)
+[ hello] hello service up (ring 3, task 13, Rust ELF)
+[superv] service 'flaky' crashed (code -1) -> restarting (restart #1)
 ```
 
 ```
@@ -90,7 +103,7 @@ syscall ABI.
 ## Building
 
 Requirements: Rust nightly (`rustup` picks it up from `rust-toolchain.toml`),
-`xorriso`, `qemu-system-x86_64`, `make`, `git`.
+`xorriso`, `mtools` (FAT disk image), `qemu-system-x86_64`, `make`, `git`.
 
 ```sh
 make            # build kernel + bootable ISO into build/k1k.iso
@@ -100,8 +113,9 @@ make test       # headless self-test (-smp 4, NVMe disk): supervisor restarts,
                 # SMP scheduling and the ring-3 disk read are all asserted
 ```
 
-`make run`/`make test` attach a 16 MiB raw disk (`build/disk.img`) as an NVMe
-controller for the `blk` service.
+`make run`/`make test` attach a 16 MiB FAT16 disk (`build/disk.img`, built with
+mtools: `/SVC/*.ELF` + `/README.TXT`) as an NVMe controller for the `blk`
+service; `make disk` rebuilds just the image.
 
 The first build clones the Limine binaries into `third_party/limine`. The
 kernel's `build.rs` builds the `user/` workspace and embeds the service ELFs,
@@ -133,9 +147,11 @@ limine.conf       bootloader configuration
 - HPET/TSC clock, inter-processor interrupts (TLB shootdown, remote reschedule).
 - IRQ capabilities (interrupt → endpoint) so drivers can stop polling;
   asynchronous notifications.
-- A file system on top of `blk` (FAT read-only first), a `fs` server, and
-  spawning services from disk — the path to booting K1OS user space.
-- Capability revocation; an allocator for `k1k-rt`.
+- A file-service protocol (open/read over IPC) so spawned services can read
+  files themselves; passing capabilities to spawned services; a service
+  manifest on disk instead of "everything in /SVC".
+- Capability revocation; an allocator for `k1k-rt`; WARP packages as the way
+  service binaries reach `/SVC`.
 
 ## License
 

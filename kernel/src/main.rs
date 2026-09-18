@@ -138,9 +138,9 @@ unsafe extern "C" fn kmain() -> ! {
 
     let autotest = boot::cmdline_has("autotest");
     if autotest {
-        klog!("k1k", "autotest mode: running services for 6 s");
+        klog!("k1k", "autotest mode: running services for 8 s");
     }
-    let deadline = arch::x86_64::interrupts::uptime_ms() + 6000;
+    let deadline = arch::x86_64::interrupts::uptime_ms() + 8000;
     loop {
         x86_64::instructions::hlt();
         if autotest && arch::x86_64::interrupts::uptime_ms() >= deadline {
@@ -172,12 +172,7 @@ unsafe extern "C" fn kmain() -> ! {
     sched::dump();
     klog!("superv", "services:");
     service::dump();
-    let flaky_restarts = service::SERVICES
-        .lock()
-        .iter()
-        .find(|s| s.spec.name == "flaky")
-        .map(|s| s.restarts)
-        .unwrap_or(0);
+    let flaky_restarts = service::restarts_of("flaky");
     let st = mm::pmm::stats();
     klog!(
         "pmm",

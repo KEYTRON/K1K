@@ -26,6 +26,7 @@ pub const SYS_MEM_CREATE_DMA: u64 = 12;
 pub const SYS_MEM_PHYS: u64 = 13;
 pub const SYS_DEV_INFO: u64 = 14;
 pub const SYS_DEV_MAP: u64 = 15;
+pub const SYS_SPAWN: u64 = 16;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -290,6 +291,53 @@ fn sys_dev_map(slot: u64, bar: u64) -> i64 {
     }
 }
 
+/// Create a supervised service from an ELF image held in a memory object.
+/// Needs a `Control` capability with `SPAWN` in `ctl_slot`.
+fn sys_spawn(ctl_slot: u64, mem_slot: u64, size: u64, name: u64) -> i64 {
+    let allowed = sched::with_current(|t| {
+        t.caps
+            .lookup(ctl_slot as u32, Rights::SPAWN)
+            .is_some_and(|c| c.is_control())
+    });
+    if !allowed {
+        return EPERM;
+    }
+    let Some(obj) = sched::with_current(|t| {
+        t.caps
+            .lookup(mem_slot as u32, Rights::MAP_READ)?
+            .memory()
+            .cloned()
+    }) else {
+        return EPERM;
+    };
+    let size = size as usize;
+    if size == 0 || size > obj.pages() * FRAME_SIZE as usize {
+        return EINVAL;
+    }
+    // Name: pointer in the low 48 bits, length in the top 16.
+    let (name_ptr, name_len) = (name & 0xFFFF_FFFF_FFFF, name >> 48);
+    let Ok(name_bytes) = copy_from_user(name_ptr, name_len.min(32)) else {
+        return EFAULT;
+    };
+    let Ok(name) = core::str::from_utf8(&name_bytes) else {
+        return EINVAL;
+    };
+
+    let mut image = Vec::with_capacity(size);
+    for frame in obj.frames() {
+        let take = (size - image.len()).min(FRAME_SIZE as usize);
+        if take == 0 {
+            break;
+        }
+        let src = phys_to_virt(frame.start_address()).as_ptr::<u8>();
+        image.extend_from_slice(unsafe { core::slice::from_raw_parts(src, take) });
+    }
+    match crate::service::spawn_from_image(name, image) {
+        Some(id) => id as i64,
+        None => EINVAL,
+    }
+}
+
 fn sys_info(buf: u64) -> i64 {
     let words = [irq::uptime_ms(), sched::current_id() as u64];
     match copy_to_user(buf, &words_to_bytes(&words)) {
@@ -323,6 +371,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_MEM_PHYS => sys_mem_phys(a0),
         SYS_DEV_INFO => sys_dev_info(a0, a1),
         SYS_DEV_MAP => sys_dev_map(a0, a1),
+        SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
         _ => {
             let name = sched::with_current(|t| t.name);
             klog!("sys", "task '{}' invoked unknown syscall {}", name, nr);

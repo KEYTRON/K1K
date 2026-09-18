@@ -103,13 +103,6 @@ impl Nvme {
         unsafe { write_volatile(self.regs.add(off) as *mut u64, v) }
     }
 
-    fn sq_doorbell(&self, qid: u16) -> usize {
-        DOORBELL_BASE + (2 * qid as usize) * self.stride
-    }
-    fn cq_doorbell(&self, qid: u16) -> usize {
-        DOORBELL_BASE + (2 * qid as usize + 1) * self.stride
-    }
-
     fn wait_ready(&self, ready: bool) -> Result<(), NvmeError> {
         for _ in 0..500 {
             let rdy = self.read32(REG_CSTS) & 1 != 0;
@@ -266,21 +259,27 @@ impl Nvme {
         self.submit(true, cmd)
     }
 
-    /// Read `count` blocks starting at `lba` into `buf` (one DMA page, so at
-    /// most 4096 bytes).
-    pub fn read(&mut self, lba: u64, count: u16, buf: &DmaPage) -> Result<(), NvmeError> {
+    /// Read `count` blocks starting at `lba` into physically contiguous memory
+    /// at `phys`. Two PRP entries cover up to 8 KiB, so `count * block_size`
+    /// must not exceed that.
+    pub fn read_phys(&mut self, lba: u64, count: u16, phys: u64) -> Result<(), NvmeError> {
+        let bytes = count as u64 * self.block_size as u64;
+        if bytes == 0 || bytes > 8192 {
+            return Err(NvmeError::NotReady);
+        }
         let mut cmd = [0u32; 16];
         cmd[0] = OPC_IO_READ as u32;
         cmd[1] = 1; // NSID
-        cmd[6] = buf.phys as u32;
-        cmd[7] = (buf.phys >> 32) as u32;
+        cmd[6] = phys as u32;
+        cmd[7] = (phys >> 32) as u32;
+        if bytes > 4096 {
+            let prp2 = (phys & !0xFFF) + 4096;
+            cmd[8] = prp2 as u32;
+            cmd[9] = (prp2 >> 32) as u32;
+        }
         cmd[10] = lba as u32;
         cmd[11] = (lba >> 32) as u32;
         cmd[12] = (count as u32 - 1) & 0xFFFF;
         self.submit(false, &cmd).map(|_| ())
-    }
-
-    pub fn doorbell_sanity(&self) -> (usize, usize) {
-        (self.sq_doorbell(1), self.cq_doorbell(1))
     }
 }

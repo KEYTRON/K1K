@@ -51,11 +51,19 @@ $(TEST_CONF): limine.conf
 test-iso: $(LIMINE)/limine kernel $(TEST_CONF)
 	sh tools/mkiso.sh $(KERNEL_ELF) $(TEST_CONF) $(TEST_ISO)
 
-# Raw disk image with a recognisable first sector (a file system comes later).
-$(DISK):
+# FAT disk image: /SVC holds the services fs loads at boot (mtools required).
+USER_BIN = user/target/x86_64-unknown-none/release
+DISK_SERVICES = hello flaky
+
+$(DISK): user
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=$(DISK_MB) status=none
-	printf 'K1K disk image v1 - read by the ring-3 nvme driver' | dd of=$(DISK) conv=notrunc status=none
+	mformat -i $(DISK) -v K1KDISK ::
+	mmd -i $(DISK) ::/SVC
+	for s in $(DISK_SERVICES); do mcopy -i $(DISK) $(USER_BIN)/$$s ::/SVC/$$(echo $$s | tr a-z A-Z).ELF; done
+	printf 'K1K disk image v1 - FAT volume served by fs over blk\n' > $(BUILD)/README.TXT
+	mcopy -i $(DISK) $(BUILD)/README.TXT ::/README.TXT
+	mdir -i $(DISK) ::/SVC
 
 disk: $(DISK)
 
@@ -69,16 +77,18 @@ run-uefi: iso $(DISK)
 		-drive if=pflash,unit=0,format=raw,file=/usr/share/edk2-ovmf/OVMF_CODE.fd,readonly=on \
 		-cdrom $(ISO) -serial stdio $(QEMU_DISK) $(QEMUFLAGS)
 
-# Headless self-test: kernel boots with `autotest`, runs the demo services for
-# a few seconds and exits QEMU with status 33 (success) via isa-debug-exit.
-# The serial log must also show the ring-3 nvme driver reading the disk.
+# Headless self-test: kernel boots with `autotest`, runs the services for a
+# few seconds and exits QEMU with status 33 (success) via isa-debug-exit.
+# The serial log must also show fs mounting the disk and spawning /SVC.
 test: test-iso $(DISK)
 	@rm -f $(BUILD)/serial.log
 	@timeout 90 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
 		-display none -serial file:$(BUILD)/serial.log -no-reboot \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMUFLAGS); \
 	status=$$?; cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
-	test $$status -eq 33 && grep -q 'blk\] sector 0: "K1K disk image' $(BUILD)/serial.log
+	test $$status -eq 33 \
+		&& grep -q 'fs\] mounted' $(BUILD)/serial.log \
+		&& grep -q 'fs\] spawned HELLO.ELF' $(BUILD)/serial.log
 
 fmt:
 	cd kernel && cargo fmt
@@ -92,6 +102,9 @@ clean:
 	cd kernel && cargo clean
 	cd user && cargo clean
 	rm -rf $(BUILD)
+
+# The disk image embeds service binaries; rebuild it when they change.
+.PHONY: $(DISK)
 
 distclean: clean
 	rm -rf $(LIMINE)

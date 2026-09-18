@@ -25,6 +25,8 @@ impl Rights {
     pub const MAP_WRITE: Rights = Rights(1 << 4);
     /// May learn the physical address of a memory object (for DMA).
     pub const DMA: Rights = Rights(1 << 5);
+    /// May create new services from ELF images (on a `Control` capability).
+    pub const SPAWN: Rights = Rights(1 << 6);
 
     pub const fn contains(self, other: Rights) -> bool {
         self.0 & other.0 == other.0
@@ -105,6 +107,8 @@ pub enum Object {
     Endpoint(Arc<Endpoint>),
     Memory(Arc<MemoryObject>),
     Device(Arc<DeviceObject>),
+    /// Kernel control authority (spawning services); held by init-like tasks.
+    Control,
 }
 
 #[derive(Clone)]
@@ -131,6 +135,9 @@ impl Capability {
             Object::Device(d) => Some(d),
             _ => None,
         }
+    }
+    pub fn is_control(&self) -> bool {
+        matches!(self.object, Object::Control)
     }
 }
 

@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "k1k-rt",
+]
+
+[[package]]
 name = "hello"
 version = "1.0.0-alpha.1"
 dependencies = [

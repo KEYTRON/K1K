@@ -122,8 +122,8 @@ tick drives its own preemption.
 
 ```
 Task ── CapTable ── [slot] ── Capability { object, rights }
-                                 object: Endpoint | Memory | Device
-                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE | DMA
+                                 object: Endpoint | Memory | Device | Control
+                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE | DMA | SPAWN
 ```
 
 `Endpoint` (`ipc/mod.rs`) is a synchronous message channel carrying
@@ -153,17 +153,34 @@ function is granted). `dev_info` describes it; `dev_map` maps a memory BAR
 uncached into the caller's address space. Device pages are tracked like shared
 pages so teardown never tries to free MMIO "frames".
 
-## Drivers in ring 3
+`Control` is the kernel's own authority object; a capability to it with
+`SPAWN` lets a task turn an ELF image held in a memory object into a new
+supervised service (`spawn`). Only `fs` holds one.
 
-Two drivers ship as services and the kernel contains neither protocol:
+## Drivers and user space in ring 3
+
+The kernel contains no device protocol and no file system:
 
 - `kbd`: the IRQ handler only pushes scancodes into an endpoint; decoding
   lives in the service, which holds the `RECV` capability.
 - `blk`: an NVMe driver. It receives the controller as a `Device` capability,
   maps BAR0, allocates DMA pages for the admin and I/O queues, identifies the
-  controller and namespace, and reads blocks — with polled completions for
-  now (IRQ capabilities are the next step). If the driver crashes, the
-  supervisor restarts it and it re-initialises the controller.
+  controller and namespace, and serves block reads to clients — polled
+  completions for now (IRQ capabilities are the next step). A client attaches
+  a DMA buffer (`REGISTER_BUF`, capability attached, page count in the high
+  half of word 0) and a reply endpoint (`SET_REPLY`), then sends `READ lba
+  count`; `blk` answers `status, blocks, block_size` after DMA-ing into the
+  buffer. The protocol constants live in `k1k-rt::blkproto`.
+- `fs`: read-only FAT12/16/32 (`user/svc/fs/src/fat.rs`) over that protocol
+  with a 64 KiB shared DMA buffer. It is also init: it lists `/SVC`, reads
+  each ELF into a memory object and calls `spawn`, which registers a dynamic
+  service (image retained in kernel memory so the supervisor can restart it)
+  and starts it.
+
+Boot therefore looks like: Limine → kernel → embedded `kbd`/`blk`/`fs`
+(and the `ping`/`pong` demo) → `fs` mounts the disk → the rest of user space
+comes from `/SVC`. If a driver crashes, the supervisor restarts it and it
+re-initialises its hardware.
 
 The keyboard IRQ is the first "driver as a message source": the handler pushes
 scancodes into a kernel-owned endpoint; the `kbd` service holds the only
@@ -211,6 +228,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 13 | `mem_phys` | `slot` | physical address, `EPERM`, `EINVAL` |
 | 14 | `dev_info` | `slot, buf[14×u64]` | 0, `EPERM`, `EFAULT` |
 | 15 | `dev_map` | `slot, bar` | base address, `EPERM`, `EINVAL`, `ENOMEM` |
+| 16 | `spawn` | `ctl_slot, mem_slot, size, name_ptr \| len<<48` | new task id, `EPERM`, `EINVAL`, `EFAULT` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.
