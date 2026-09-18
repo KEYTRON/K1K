@@ -47,22 +47,34 @@ the drivers and the VFS it needs.
   capability (rights ∩ mask, `GRANT` required) — the only way authority moves
   between tasks.
 - Memory objects: shareable sets of frames that tasks create, hand over as
-  capabilities and map into their own address space (`MAP_READ`/`MAP_WRITE`).
-- Ring-3 tasks with `syscall`/`sysret`; syscalls: `log`, `exit`, `yield`,
+  capabilities and map into their own address space (`MAP_READ`/`MAP_WRITE`);
+  DMA variants are physically contiguous and expose their physical address.
+- Device capabilities: the kernel enumerates PCI, sizes the BARs and hands a
+  function to a driver task, which maps the MMIO BARs itself. The kernel never
+  touches the device.
+- Ring-3 tasks with `syscall`/`sysret`; 16 syscalls: `log`, `exit`, `yield`,
   `sleep`, `send`, `recv`, `info`, `send_cap`, `cap_drop`, `mem_create`,
-  `mem_map`. All registers except `rax/rcx/r11` are preserved across a syscall.
-- PCI configuration-space enumeration at boot (drivers themselves will live in
-  ring 3).
+  `mem_map`, `ep_create`, `mem_create_dma`, `mem_phys`, `dev_info`, `dev_map`.
+  All registers except `rax/rcx/r11` are preserved across a syscall.
 - Static ELF64 loader: services are ordinary Rust `no_std` programs built
   against the `k1k-rt` runtime crate (`user/`), with R/RX/RW segment
   permissions applied per `PT_LOAD`.
 - A supervisor thread that reaps dead tasks and re-instantiates crashed services
   from their image (with backoff).
 - Services shipped in the image: `kbd` — the PS/2 keyboard driver running in
-  ring 3 (the kernel only forwards scancodes into an endpoint), `hello`,
+  ring 3 (the kernel only forwards scancodes into an endpoint); `blk` — an
+  NVMe driver in ring 3 (admin + I/O queues over DMA pages, polled
+  completions) that identifies the controller and reads the disk; `hello`;
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
-  allocates and grants to `ping` as a capability — and `flaky`, which
+  allocates and grants to `ping` as a capability; and `flaky`, which
   dereferences NULL every third iteration and is brought back without a reboot.
+  A service that exits with code 0 is considered finished and not restarted.
+
+```
+[superv] nvme 00:03.0 handed to service 'blk'
+[   blk] nvme ready: model "QEMU NVMe Ctrl" serial "K1K-NVME-0001", 32768 blocks x 512 B = 16 MiB
+[   blk] sector 0: "K1K disk image v1 - read by the ring-3 nvme driver"
+```
 
 ```
 [ flaky] about to dereference NULL...
@@ -84,8 +96,12 @@ Requirements: Rust nightly (`rustup` picks it up from `rust-toolchain.toml`),
 make            # build kernel + bootable ISO into build/k1k.iso
 make run        # boot it in QEMU (BIOS), serial on stdio
 make run-uefi   # boot with OVMF
-make test       # headless self-test: exits 0 when the supervisor restarted `flaky`
+make test       # headless self-test (-smp 4, NVMe disk): supervisor restarts,
+                # SMP scheduling and the ring-3 disk read are all asserted
 ```
+
+`make run`/`make test` attach a 16 MiB raw disk (`build/disk.img`) as an NVMe
+controller for the `blk` service.
 
 The first build clones the Limine binaries into `third_party/limine`. The
 kernel's `build.rs` builds the `user/` workspace and embeds the service ELFs,
@@ -115,8 +131,10 @@ limine.conf       bootloader configuration
 ## Roadmap (short)
 
 - HPET/TSC clock, inter-processor interrupts (TLB shootdown, remote reschedule).
-- Asynchronous notifications; IRQ and PCI-device capabilities so ring-3
-  drivers can own hardware; AHCI/virtio drivers and a VFS server.
+- IRQ capabilities (interrupt → endpoint) so drivers can stop polling;
+  asynchronous notifications.
+- A file system on top of `blk` (FAT read-only first), a `fs` server, and
+  spawning services from disk — the path to booting K1OS user space.
 - Capability revocation; an allocator for `k1k-rt`.
 
 ## License

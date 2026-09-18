@@ -21,6 +21,11 @@ pub mod sys {
     pub const CAP_DROP: u64 = 8;
     pub const MEM_CREATE: u64 = 9;
     pub const MEM_MAP: u64 = 10;
+    pub const EP_CREATE: u64 = 11;
+    pub const MEM_CREATE_DMA: u64 = 12;
+    pub const MEM_PHYS: u64 = 13;
+    pub const DEV_INFO: u64 = 14;
+    pub const DEV_MAP: u64 = 15;
 }
 
 /// Capability rights bits, as understood by the kernel.
@@ -30,6 +35,7 @@ pub mod rights {
     pub const GRANT: u32 = 1 << 2;
     pub const MAP_READ: u32 = 1 << 3;
     pub const MAP_WRITE: u32 = 1 << 4;
+    pub const DMA: u32 = 1 << 5;
 }
 
 /// Word 3 of a received message when no capability was attached.
@@ -165,6 +171,75 @@ pub fn mem_create(pages: usize) -> Result<Cap> {
 /// Map a memory object into our address space; returns its base address.
 pub fn mem_map(cap: Cap, writable: bool) -> Result<*mut u8> {
     check(syscall(sys::MEM_MAP, cap.0 as u64, writable as u64, 0, 0)).map(|va| va as *mut u8)
+}
+
+/// Create an endpoint we own (SEND | RECV | GRANT).
+pub fn ep_create() -> Result<Cap> {
+    check(syscall(sys::EP_CREATE, 0, 0, 0, 0)).map(|s| Cap(s as u32))
+}
+
+/// Allocate physically contiguous zeroed pages suitable for DMA.
+pub fn mem_create_dma(pages: usize) -> Result<Cap> {
+    check(syscall(sys::MEM_CREATE_DMA, pages as u64, 0, 0, 0)).map(|s| Cap(s as u32))
+}
+
+/// Physical address of a DMA memory object.
+pub fn mem_phys(cap: Cap) -> Result<u64> {
+    check(syscall(sys::MEM_PHYS, cap.0 as u64, 0, 0, 0))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Bar {
+    pub base: u64,
+    pub size: u64,
+    pub io: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DevInfo {
+    pub vendor: u16,
+    pub device: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub bus: u8,
+    pub slot: u8,
+    pub func: u8,
+    pub bars: [Bar; 6],
+}
+
+/// Describe a PCI device capability.
+pub fn dev_info(cap: Cap) -> Result<DevInfo> {
+    let mut w = [0u64; 14];
+    check(syscall(
+        sys::DEV_INFO,
+        cap.0 as u64,
+        w.as_mut_ptr() as u64,
+        0,
+        0,
+    ))?;
+    let mut info = DevInfo {
+        vendor: w[0] as u16,
+        device: (w[0] >> 16) as u16,
+        class: (w[0] >> 32) as u8,
+        subclass: (w[0] >> 40) as u8,
+        bus: (w[1] >> 16) as u8,
+        slot: (w[1] >> 8) as u8,
+        func: w[1] as u8,
+        bars: [Bar::default(); 6],
+    };
+    for i in 0..6 {
+        info.bars[i] = Bar {
+            base: w[2 + 2 * i],
+            size: w[3 + 2 * i] & !(1 << 63),
+            io: w[3 + 2 * i] >> 63 != 0,
+        };
+    }
+    Ok(info)
+}
+
+/// Map a device's memory BAR (uncached); returns its base address.
+pub fn dev_map(cap: Cap, bar: usize) -> Result<*mut u8> {
+    check(syscall(sys::DEV_MAP, cap.0 as u64, bar as u64, 0, 0)).map(|va| va as *mut u8)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

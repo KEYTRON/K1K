@@ -116,10 +116,16 @@ pub fn map_mmio(phys: PhysAddr, len: u64) {
 /// Where shared memory objects get mapped in user space (grows upward).
 const USER_MMAP_BASE: u64 = 0x0000_0010_0000_0000;
 
+/// What backs a user mapping whose frames this address space does not own.
+enum Foreign {
+    Memory(#[allow(dead_code)] Arc<MemoryObject>),
+    Device,
+}
+
 struct SharedMapping {
     start: VirtAddr,
     pages: usize,
-    _object: Arc<MemoryObject>,
+    _owner: Foreign,
 }
 
 /// A user address space. The kernel half (PML4 entries 256..512) is shared with
@@ -171,9 +177,41 @@ impl AddressSpace {
         self.shared.push(SharedMapping {
             start,
             pages,
-            _object: obj,
+            _owner: Foreign::Memory(obj),
         });
         Some(start)
+    }
+
+    /// Map a device's MMIO range (uncached) at a fresh address.
+    pub fn map_device(&mut self, phys: PhysAddr, size: u64) -> Option<VirtAddr> {
+        let start = VirtAddr::new(self.mmap_next);
+        let first = phys.as_u64() & !(pmm::FRAME_SIZE - 1);
+        let end = (phys.as_u64() + size + pmm::FRAME_SIZE - 1) & !(pmm::FRAME_SIZE - 1);
+        let pages = ((end - first) / pmm::FRAME_SIZE) as usize;
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE
+            | PageTableFlags::NO_EXECUTE
+            | PageTableFlags::NO_CACHE
+            | PageTableFlags::WRITE_THROUGH;
+        let mut mapper = mapper_for(self.pml4);
+        let mut alloc = GlobalFrameAllocator;
+        for i in 0..pages {
+            let page = Page::<Size4KiB>::containing_address(start + (i as u64) * pmm::FRAME_SIZE);
+            let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+                first + (i as u64) * pmm::FRAME_SIZE,
+            ));
+            unsafe {
+                mapper.map_to(page, frame, flags, &mut alloc).ok()?.ignore();
+            }
+        }
+        self.mmap_next += (pages as u64 + 1) * pmm::FRAME_SIZE;
+        self.shared.push(SharedMapping {
+            start,
+            pages,
+            _owner: Foreign::Device,
+        });
+        Some(start + (phys.as_u64() - first))
     }
 
     fn unmap_shared(&mut self) {

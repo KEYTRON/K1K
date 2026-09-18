@@ -8,20 +8,30 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::VirtAddr;
 
-use crate::arch::x86_64::{context, gdt, interrupts as irq};
+use crate::arch::x86_64::{context, gdt, interrupts as irq, pci};
 use crate::ipc::{self, Endpoint};
 use crate::klog;
 use crate::loader;
 use crate::mm::vmm::{AddressSpace, Flags, USER_STACK_TOP};
-use crate::obj::{Capability, Object, Rights};
+use crate::obj::{Capability, DeviceObject, Object, Rights};
 use crate::sched::{self, UserEntry, task::Task};
 
 const USER_STACK_PAGES: usize = 16;
 const MAX_RESTARTS_BEFORE_BACKOFF: u32 = 3;
 
+/// A capability handed to a service at start (and on every restart).
 pub struct Grant {
-    pub endpoint: Arc<Endpoint>,
+    pub object: Object,
     pub rights: Rights,
+}
+
+impl Grant {
+    fn endpoint(ep: &Arc<Endpoint>, rights: Rights) -> Self {
+        Self {
+            object: Object::Endpoint(ep.clone()),
+            rights,
+        }
+    }
 }
 
 pub struct ServiceSpec {
@@ -50,6 +60,7 @@ static FLAKY: &[u8] = image!("flaky");
 static PING: &[u8] = image!("ping");
 static PONG: &[u8] = image!("pong");
 static KBD: &[u8] = image!("kbd");
+static BLK: &[u8] = image!("blk");
 
 pub fn register(spec: ServiceSpec) -> usize {
     let mut s = SERVICES.lock();
@@ -62,7 +73,7 @@ pub fn register(spec: ServiceSpec) -> usize {
     s.len() - 1
 }
 
-/// Register the built-in services and wire their IPC capabilities.
+/// Register the built-in services and wire their capabilities.
 pub fn init_builtin() {
     let req = Endpoint::new();
     let rep = Endpoint::new();
@@ -70,11 +81,33 @@ pub fn init_builtin() {
     register(ServiceSpec {
         name: "kbd",
         image: KBD,
-        grants: alloc::vec![Grant {
-            endpoint: ipc::keyboard_endpoint(),
-            rights: Rights::RECV,
-        }],
+        grants: alloc::vec![Grant::endpoint(&ipc::keyboard_endpoint(), Rights::RECV)],
     });
+
+    // Storage driver: gets the first NVMe controller as a device capability.
+    let mut blk_grants = Vec::new();
+    if let Some(nvme) = pci::find(0x01, 0x08) {
+        pci::enable(&nvme);
+        blk_grants.push(Grant {
+            object: Object::Device(Arc::new(DeviceObject { pci: nvme })),
+            rights: Rights::MAP_READ.union(Rights::MAP_WRITE),
+        });
+        klog!(
+            "superv",
+            "nvme {:02x}:{:02x}.{} handed to service 'blk'",
+            nvme.bus,
+            nvme.slot,
+            nvme.func
+        );
+    } else {
+        klog!("superv", "no NVMe controller found; 'blk' will exit");
+    }
+    register(ServiceSpec {
+        name: "blk",
+        image: BLK,
+        grants: blk_grants,
+    });
+
     register(ServiceSpec {
         name: "hello",
         image: HELLO,
@@ -89,28 +122,16 @@ pub fn init_builtin() {
         name: "pong",
         image: PONG,
         grants: alloc::vec![
-            Grant {
-                endpoint: req.clone(),
-                rights: Rights::RECV,
-            },
-            Grant {
-                endpoint: rep.clone(),
-                rights: Rights::SEND,
-            },
+            Grant::endpoint(&req, Rights::RECV),
+            Grant::endpoint(&rep, Rights::SEND),
         ],
     });
     register(ServiceSpec {
         name: "ping",
         image: PING,
         grants: alloc::vec![
-            Grant {
-                endpoint: req,
-                rights: Rights::SEND,
-            },
-            Grant {
-                endpoint: rep,
-                rights: Rights::RECV,
-            },
+            Grant::endpoint(&req, Rights::SEND),
+            Grant::endpoint(&rep, Rights::RECV),
         ],
     });
 }
@@ -125,7 +146,7 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
             .grants
             .iter()
             .map(|g| Capability {
-                object: Object::Endpoint(g.endpoint.clone()),
+                object: g.object.clone(),
                 rights: g.rights,
             })
             .collect();
@@ -201,7 +222,8 @@ pub fn start_all() {
     }
 }
 
-/// The supervisor thread: reaps dead tasks and restarts services.
+/// The supervisor thread: reaps dead tasks and restarts services that
+/// crashed or failed. A clean `exit(0)` means the service is done.
 pub extern "C" fn supervisor_main(_: u64) {
     klog!(
         "superv",
@@ -220,6 +242,18 @@ pub extern "C" fn supervisor_main(_: u64) {
                 continue;
             };
 
+            if code == 0 {
+                let mut s = SERVICES.lock();
+                s[idx].task = None;
+                s[idx].last_exit = Some(0);
+                klog!(
+                    "superv",
+                    "service '{}' finished cleanly, not restarting",
+                    name
+                );
+                continue;
+            }
+
             let (restarts, delay_ms) = {
                 let mut s = SERVICES.lock();
                 let st = &mut s[idx];
@@ -233,7 +267,7 @@ pub extern "C" fn supervisor_main(_: u64) {
                 };
                 (st.restarts, backoff)
             };
-            let reason = if code < 0 { "crashed" } else { "exited" };
+            let reason = if code < 0 { "crashed" } else { "failed" };
             klog!(
                 "superv",
                 "service '{}' {} (code {}) -> restarting (restart #{}{})",

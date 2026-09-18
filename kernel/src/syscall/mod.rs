@@ -1,10 +1,11 @@
 //! System call dispatcher and user-memory access helpers.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use x86_64::VirtAddr;
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::arch::x86_64::interrupts as irq;
-use crate::ipc::{IpcError, Message};
+use crate::ipc::{Endpoint, IpcError, Message};
 use crate::mm::pmm::{FRAME_SIZE, phys_to_virt};
 use crate::obj::{Capability, MemoryObject, Object, Rights};
 use crate::{klog, sched};
@@ -20,6 +21,11 @@ pub const SYS_SEND_CAP: u64 = 7;
 pub const SYS_CAP_DROP: u64 = 8;
 pub const SYS_MEM_CREATE: u64 = 9;
 pub const SYS_MEM_MAP: u64 = 10;
+pub const SYS_EP_CREATE: u64 = 11;
+pub const SYS_MEM_CREATE_DMA: u64 = 12;
+pub const SYS_MEM_PHYS: u64 = 13;
+pub const SYS_DEV_INFO: u64 = 14;
+pub const SYS_DEV_MAP: u64 = 15;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -34,6 +40,10 @@ pub const NO_CAP: u64 = u64::MAX;
 const USER_TOP: u64 = 0x0000_8000_0000_0000;
 const MAX_LOG: u64 = 4096;
 const MAX_MEM_PAGES: u64 = 1024;
+const MAX_DMA_PAGES: u64 = 64;
+
+/// Layout of the `dev_info` buffer, in u64 words.
+pub const DEV_INFO_WORDS: usize = 14;
 
 fn user_range_ok(ptr: u64, len: u64) -> bool {
     len <= MAX_LOG && ptr.checked_add(len).is_some_and(|end| end <= USER_TOP)
@@ -59,7 +69,7 @@ fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, i64> {
     while va < end {
         let pa = translate_user(va).ok_or(EFAULT)?;
         let chunk = (FRAME_SIZE - (va % FRAME_SIZE)).min(end - va) as usize;
-        let src = phys_to_virt(x86_64::PhysAddr::new(pa)).as_ptr::<u8>();
+        let src = phys_to_virt(PhysAddr::new(pa)).as_ptr::<u8>();
         out.extend_from_slice(unsafe { core::slice::from_raw_parts(src, chunk) });
         va += chunk as u64;
     }
@@ -76,7 +86,7 @@ fn copy_to_user(ptr: u64, data: &[u8]) -> Result<(), i64> {
         let pa = translate_user(va).ok_or(EFAULT)?;
         let chunk = (FRAME_SIZE - (va % FRAME_SIZE)) as usize;
         let chunk = chunk.min(data.len() - off);
-        let dst = phys_to_virt(x86_64::PhysAddr::new(pa)).as_mut_ptr::<u8>();
+        let dst = phys_to_virt(PhysAddr::new(pa)).as_mut_ptr::<u8>();
         unsafe { core::ptr::copy_nonoverlapping(data[off..].as_ptr(), dst, chunk) };
         off += chunk;
     }
@@ -87,8 +97,15 @@ fn words_to_bytes(words: &[u64]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-fn lookup_endpoint(slot: u64, rights: Rights) -> Option<alloc::sync::Arc<crate::ipc::Endpoint>> {
+fn lookup_endpoint(slot: u64, rights: Rights) -> Option<Arc<Endpoint>> {
     sched::with_current(|t| t.caps.lookup(slot as u32, rights)?.endpoint().cloned())
+}
+
+fn insert_cap(cap: Capability) -> i64 {
+    match sched::with_current(|t| t.caps.insert(cap)) {
+        Some(slot) => slot as i64,
+        None => ENOMEM,
+    }
 }
 
 fn sys_log(ptr: u64, len: u64) -> i64 {
@@ -103,7 +120,7 @@ fn sys_log(ptr: u64, len: u64) -> i64 {
     }
 }
 
-fn deliver(ep: &crate::ipc::Endpoint, msg: Message) -> i64 {
+fn deliver(ep: &Endpoint, msg: Message) -> i64 {
     match ep.send(msg) {
         Ok(()) => 0,
         Err(IpcError::QueueFull) => EAGAIN,
@@ -158,23 +175,36 @@ fn sys_cap_drop(slot: u64) -> i64 {
     }
 }
 
-fn sys_mem_create(pages: u64) -> i64 {
-    if pages == 0 || pages > MAX_MEM_PAGES {
+fn sys_ep_create() -> i64 {
+    insert_cap(Capability {
+        object: Object::Endpoint(Endpoint::new()),
+        rights: Rights::SEND.union(Rights::RECV).union(Rights::GRANT),
+    })
+}
+
+fn sys_mem_create(pages: u64, dma: bool) -> i64 {
+    let limit = if dma { MAX_DMA_PAGES } else { MAX_MEM_PAGES };
+    if pages == 0 || pages > limit {
         return EINVAL;
     }
-    let Some(obj) = MemoryObject::new(pages as usize) else {
+    let obj = if dma {
+        MemoryObject::new_contiguous(pages as usize)
+    } else {
+        MemoryObject::new(pages as usize)
+    };
+    let Some(obj) = obj else {
         return ENOMEM;
     };
-    let cap = Capability {
-        object: Object::Memory(obj),
-        rights: Rights::MAP_READ
-            .union(Rights::MAP_WRITE)
-            .union(Rights::GRANT),
-    };
-    match sched::with_current(|t| t.caps.insert(cap)) {
-        Some(slot) => slot as i64,
-        None => ENOMEM,
+    let mut rights = Rights::MAP_READ
+        .union(Rights::MAP_WRITE)
+        .union(Rights::GRANT);
+    if dma {
+        rights = rights.union(Rights::DMA);
     }
+    insert_cap(Capability {
+        object: Object::Memory(obj),
+        rights,
+    })
 }
 
 fn sys_mem_map(slot: u64, writable: u64) -> i64 {
@@ -189,6 +219,71 @@ fn sys_mem_map(slot: u64, writable: u64) -> i64 {
         return EPERM;
     };
     let mapped = sched::with_current(|t| t.addr_space.as_mut()?.map_shared(obj, writable));
+    match mapped {
+        Some(va) => va.as_u64() as i64,
+        None => ENOMEM,
+    }
+}
+
+/// Physical address of a contiguous memory object (DMA right required).
+fn sys_mem_phys(slot: u64) -> i64 {
+    let Some(obj) =
+        sched::with_current(|t| t.caps.lookup(slot as u32, Rights::DMA)?.memory().cloned())
+    else {
+        return EPERM;
+    };
+    if !obj.is_contiguous() {
+        return EINVAL;
+    }
+    obj.frames()[0].start_address().as_u64() as i64
+}
+
+/// Describe a device: word 0 = vendor | device<<16 | class<<32 | subclass<<40,
+/// word 1 = bus<<16 | slot<<8 | func, then 6 × (base, size | io<<63).
+fn sys_dev_info(slot: u64, buf: u64) -> i64 {
+    let Some(dev) = sched::with_current(|t| {
+        t.caps
+            .lookup(slot as u32, Rights::MAP_READ)?
+            .device()
+            .cloned()
+    }) else {
+        return EPERM;
+    };
+    let p = &dev.pci;
+    let mut words = [0u64; DEV_INFO_WORDS];
+    words[0] = p.vendor as u64
+        | (p.device as u64) << 16
+        | (p.class as u64) << 32
+        | (p.subclass as u64) << 40;
+    words[1] = (p.bus as u64) << 16 | (p.slot as u64) << 8 | p.func as u64;
+    for (i, b) in p.bars.iter().enumerate() {
+        words[2 + 2 * i] = b.base;
+        words[3 + 2 * i] = b.size | if b.io { 1 << 63 } else { 0 };
+    }
+    match copy_to_user(buf, &words_to_bytes(&words)) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Map a device's memory BAR into the caller's address space.
+fn sys_dev_map(slot: u64, bar: u64) -> i64 {
+    let need = Rights::MAP_READ.union(Rights::MAP_WRITE);
+    let Some(dev) = sched::with_current(|t| t.caps.lookup(slot as u32, need)?.device().cloned())
+    else {
+        return EPERM;
+    };
+    let Some(b) = dev.pci.bars.get(bar as usize).copied() else {
+        return EINVAL;
+    };
+    if b.size == 0 || b.io {
+        return EINVAL;
+    }
+    let mapped = sched::with_current(|t| {
+        t.addr_space
+            .as_mut()?
+            .map_device(PhysAddr::new(b.base), b.size)
+    });
     match mapped {
         Some(va) => va.as_u64() as i64,
         None => ENOMEM,
@@ -221,8 +316,13 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_INFO => sys_info(a0),
         SYS_SEND_CAP => sys_send_cap(a0, a1, a2, a3),
         SYS_CAP_DROP => sys_cap_drop(a0),
-        SYS_MEM_CREATE => sys_mem_create(a0),
+        SYS_MEM_CREATE => sys_mem_create(a0, false),
         SYS_MEM_MAP => sys_mem_map(a0, a1),
+        SYS_EP_CREATE => sys_ep_create(),
+        SYS_MEM_CREATE_DMA => sys_mem_create(a0, true),
+        SYS_MEM_PHYS => sys_mem_phys(a0),
+        SYS_DEV_INFO => sys_dev_info(a0, a1),
+        SYS_DEV_MAP => sys_dev_map(a0, a1),
         _ => {
             let name = sched::with_current(|t| t.name);
             klog!("sys", "task '{}' invoked unknown syscall {}", name, nr);

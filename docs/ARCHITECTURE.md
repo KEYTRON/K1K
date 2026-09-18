@@ -122,8 +122,8 @@ tick drives its own preemption.
 
 ```
 Task ── CapTable ── [slot] ── Capability { object, rights }
-                                 object: Endpoint | Memory
-                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE
+                                 object: Endpoint | Memory | Device
+                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE | DMA
 ```
 
 `Endpoint` (`ipc/mod.rs`) is a synchronous message channel carrying
@@ -144,6 +144,26 @@ into the caller's address space at a kernel-chosen address above
 `0x10_0000_0000` (read-only unless the capability has `MAP_WRITE`). Frames go
 back to the PMM when the last capability and the last mapping are gone;
 tearing down an address space unmaps shared pages without freeing them.
+`mem_create_dma` allocates physically contiguous frames and adds the `DMA`
+right, which unlocks `mem_phys` — the physical address a device needs.
+
+`DeviceObject` wraps a PCI function found by the boot-time scan (`pci.rs`,
+which also sizes the BARs and enables memory decoding + bus mastering when a
+function is granted). `dev_info` describes it; `dev_map` maps a memory BAR
+uncached into the caller's address space. Device pages are tracked like shared
+pages so teardown never tries to free MMIO "frames".
+
+## Drivers in ring 3
+
+Two drivers ship as services and the kernel contains neither protocol:
+
+- `kbd`: the IRQ handler only pushes scancodes into an endpoint; decoding
+  lives in the service, which holds the `RECV` capability.
+- `blk`: an NVMe driver. It receives the controller as a `Device` capability,
+  maps BAR0, allocates DMA pages for the admin and I/O queues, identifies the
+  controller and namespace, and reads blocks — with polled completions for
+  now (IRQ capabilities are the next step). If the driver crashes, the
+  supervisor restarts it and it re-initialises the controller.
 
 The keyboard IRQ is the first "driver as a message source": the handler pushes
 scancodes into a kernel-owned endpoint; the `kbd` service holds the only
@@ -186,6 +206,11 @@ wrappers in `user/rt` (`k1k-rt`).
 | 8 | `cap_drop` | `slot` | 0, `EINVAL` |
 | 9 | `mem_create` | `pages` (1..=1024) | new slot, `EINVAL`, `ENOMEM` |
 | 10 | `mem_map` | `slot, writable` | base address, `EPERM`, `ENOMEM` |
+| 11 | `ep_create` | — | new slot (`SEND|RECV|GRANT`), `ENOMEM` |
+| 12 | `mem_create_dma` | `pages` (1..=64, contiguous) | new slot (`+DMA`), `EINVAL`, `ENOMEM` |
+| 13 | `mem_phys` | `slot` | physical address, `EPERM`, `EINVAL` |
+| 14 | `dev_info` | `slot, buf[14×u64]` | 0, `EPERM`, `EFAULT` |
+| 15 | `dev_map` | `slot, bar` | base address, `EPERM`, `EINVAL`, `ENOMEM` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

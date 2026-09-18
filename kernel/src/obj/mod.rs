@@ -10,6 +10,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use x86_64::structures::paging::PhysFrame;
 
+use crate::arch::x86_64::pci::PciDevice;
 use crate::ipc::Endpoint;
 use crate::mm::pmm;
 
@@ -22,6 +23,8 @@ impl Rights {
     pub const GRANT: Rights = Rights(1 << 2);
     pub const MAP_READ: Rights = Rights(1 << 3);
     pub const MAP_WRITE: Rights = Rights(1 << 4);
+    /// May learn the physical address of a memory object (for DMA).
+    pub const DMA: Rights = Rights(1 << 5);
 
     pub const fn contains(self, other: Rights) -> bool {
         self.0 & other.0 == other.0
@@ -38,6 +41,7 @@ impl Rights {
 /// are returned to the PMM when the last capability and mapping are gone.
 pub struct MemoryObject {
     frames: Vec<PhysFrame>,
+    contiguous: bool,
 }
 
 impl MemoryObject {
@@ -54,7 +58,20 @@ impl MemoryObject {
                 }
             }
         }
-        Some(Arc::new(Self { frames }))
+        Some(Arc::new(Self {
+            frames,
+            contiguous: false,
+        }))
+    }
+
+    /// Physically contiguous, zeroed — what a DMA engine wants.
+    pub fn new_contiguous(pages: usize) -> Option<Arc<Self>> {
+        let first = pmm::alloc_contiguous_zeroed(pages)?;
+        let frames = (0..pages as u64).map(|i| first + i).collect();
+        Some(Arc::new(Self {
+            frames,
+            contiguous: true,
+        }))
     }
 
     pub fn frames(&self) -> &[PhysFrame] {
@@ -63,6 +80,10 @@ impl MemoryObject {
 
     pub fn pages(&self) -> usize {
         self.frames.len()
+    }
+
+    pub fn is_contiguous(&self) -> bool {
+        self.contiguous
     }
 }
 
@@ -74,10 +95,16 @@ impl Drop for MemoryObject {
     }
 }
 
+/// A PCI function handed to a ring-3 driver: its BARs may be mapped.
+pub struct DeviceObject {
+    pub pci: PciDevice,
+}
+
 #[derive(Clone)]
 pub enum Object {
     Endpoint(Arc<Endpoint>),
     Memory(Arc<MemoryObject>),
+    Device(Arc<DeviceObject>),
 }
 
 #[derive(Clone)]
@@ -96,6 +123,12 @@ impl Capability {
     pub fn memory(&self) -> Option<&Arc<MemoryObject>> {
         match &self.object {
             Object::Memory(m) => Some(m),
+            _ => None,
+        }
+    }
+    pub fn device(&self) -> Option<&Arc<DeviceObject>> {
+        match &self.object {
+            Object::Device(d) => Some(d),
             _ => None,
         }
     }

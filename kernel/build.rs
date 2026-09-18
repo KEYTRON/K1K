@@ -5,7 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SERVICES: &[&str] = &["hello", "flaky", "ping", "pong", "kbd"];
+const SERVICES: &[&str] = &["hello", "flaky", "ping", "pong", "kbd", "blk"];
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

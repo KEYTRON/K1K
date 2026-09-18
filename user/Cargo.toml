@@ -7,6 +7,7 @@ members = [
     "svc/ping",
     "svc/pong",
     "svc/kbd",
+    "svc/blk",
 ]
 
 [workspace.package]

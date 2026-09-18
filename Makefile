@@ -8,6 +8,12 @@ BUILD      = build
 ISO        = $(BUILD)/k1k.iso
 TEST_ISO   = $(BUILD)/k1k-test.iso
 TEST_CONF  = $(BUILD)/limine-test.conf
+DISK       = $(BUILD)/disk.img
+DISK_MB   ?= 16
+
+# Storage the ring-3 blk service drives: an NVMe controller with a raw image.
+QEMU_DISK  = -drive file=$(DISK),if=none,format=raw,id=nvme0 \
+             -device nvme,drive=nvme0,serial=K1K-NVME-0001
 
 ifeq ($(PROFILE),release)
   CARGO_PROFILE_FLAG = --release
@@ -17,7 +23,7 @@ else
   KERNEL_ELF = kernel/target/x86_64-unknown-none/debug/k1k
 endif
 
-.PHONY: all user kernel iso run run-bios run-uefi test clean distclean limine fmt clippy
+.PHONY: all user kernel iso test-iso disk run run-bios run-uefi test clean distclean limine fmt clippy
 
 all: iso
 
@@ -45,24 +51,34 @@ $(TEST_CONF): limine.conf
 test-iso: $(LIMINE)/limine kernel $(TEST_CONF)
 	sh tools/mkiso.sh $(KERNEL_ELF) $(TEST_CONF) $(TEST_ISO)
 
+# Raw disk image with a recognisable first sector (a file system comes later).
+$(DISK):
+	@mkdir -p $(BUILD)
+	dd if=/dev/zero of=$(DISK) bs=1M count=$(DISK_MB) status=none
+	printf 'K1K disk image v1 - read by the ring-3 nvme driver' | dd of=$(DISK) conv=notrunc status=none
+
+disk: $(DISK)
+
 run: run-bios
 
-run-bios: iso
-	qemu-system-x86_64 -M q35 -cdrom $(ISO) -boot d -serial stdio $(QEMUFLAGS)
+run-bios: iso $(DISK)
+	qemu-system-x86_64 -M q35 -cdrom $(ISO) -boot d -serial stdio $(QEMU_DISK) $(QEMUFLAGS)
 
-run-uefi: iso
+run-uefi: iso $(DISK)
 	qemu-system-x86_64 -M q35 \
 		-drive if=pflash,unit=0,format=raw,file=/usr/share/edk2-ovmf/OVMF_CODE.fd,readonly=on \
-		-cdrom $(ISO) -serial stdio $(QEMUFLAGS)
+		-cdrom $(ISO) -serial stdio $(QEMU_DISK) $(QEMUFLAGS)
 
 # Headless self-test: kernel boots with `autotest`, runs the demo services for
 # a few seconds and exits QEMU with status 33 (success) via isa-debug-exit.
-test: test-iso
+# The serial log must also show the ring-3 nvme driver reading the disk.
+test: test-iso $(DISK)
 	@rm -f $(BUILD)/serial.log
-	@timeout 60 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
+	@timeout 90 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
 		-display none -serial file:$(BUILD)/serial.log -no-reboot \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMUFLAGS); \
-	status=$$?; cat $(BUILD)/serial.log; echo "qemu exit: $$status"; test $$status -eq 33
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMUFLAGS); \
+	status=$$?; cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
+	test $$status -eq 33 && grep -q 'blk\] sector 0: "K1K disk image' $(BUILD)/serial.log
 
 fmt:
 	cd kernel && cargo fmt

@@ -66,6 +66,26 @@ impl Bitmap {
         None
     }
 
+    fn alloc_contiguous(&mut self, count: usize) -> Option<usize> {
+        let mut run = 0;
+        for i in 0..self.frames {
+            if self.is_used(i) {
+                run = 0;
+                continue;
+            }
+            run += 1;
+            if run == count {
+                let first = i + 1 - count;
+                for j in first..=i {
+                    self.set_used(j);
+                }
+                self.free -= count;
+                return Some(first);
+            }
+        }
+        None
+    }
+
     fn release(&mut self, i: usize) {
         debug_assert!(self.is_used(i), "double free of frame {i}");
         self.set_free(i);
@@ -184,6 +204,20 @@ pub fn alloc_zeroed_frame() -> Option<PhysFrame> {
         );
     }
     Some(f)
+}
+
+/// Allocate `count` physically contiguous zeroed frames; returns the first.
+pub fn alloc_contiguous_zeroed(count: usize) -> Option<PhysFrame> {
+    let idx = PMM.lock().as_mut()?.alloc_contiguous(count)?;
+    let first = PhysFrame::containing_address(PhysAddr::new(idx as u64 * FRAME_SIZE));
+    unsafe {
+        core::ptr::write_bytes(
+            phys_to_virt(first.start_address()).as_mut_ptr::<u8>(),
+            0,
+            count * FRAME_SIZE as usize,
+        );
+    }
+    Some(first)
 }
 
 pub fn free_frame(frame: PhysFrame) {
