@@ -54,10 +54,15 @@ a FAT volume.
 - Device capabilities: the kernel enumerates PCI, sizes the BARs and hands a
   function to a driver task, which maps the MMIO BARs itself. The kernel never
   touches the device.
-- Ring-3 tasks with `syscall`/`sysret`; 17 syscalls: `log`, `exit`, `yield`,
+- Interrupt and port capabilities: an interrupt object (ISA line through the
+  I/O APIC, or a PCI function's MSI-X entry) delivers each interrupt as a
+  message on an endpoint the driver chose; a port capability grants a range
+  of x86 I/O ports. The kernel has no keyboard or disk code at all.
+- Ring-3 tasks with `syscall`/`sysret`; 22 syscalls: `log`, `exit`, `yield`,
   `sleep`, `send`, `recv`, `info`, `send_cap`, `cap_drop`, `mem_create`,
   `mem_map`, `ep_create`, `mem_create_dma`, `mem_phys`, `dev_info`, `dev_map`,
-  `spawn`. All registers except `rax/rcx/r11` are preserved across a syscall.
+  `spawn`, `irq_bind`, `irq_ack`, `dev_irq`, `port_in`, `port_out`. All
+  registers except `rax/rcx/r11` are preserved across a syscall.
 - User space comes from disk: the kernel image embeds only the drivers and
   the file-system server; `fs` mounts the FAT volume and `spawn`s every ELF
   under `/SVC` as a supervised service (a `Control` capability with the
@@ -69,10 +74,11 @@ a FAT volume.
 - A supervisor thread that reaps dead tasks and re-instantiates crashed services
   from their image (with backoff).
 - Services embedded in the kernel image: `kbd` — the PS/2 keyboard driver in
-  ring 3 (the kernel only forwards scancodes into an endpoint); `blk` — an
-  NVMe driver in ring 3 (admin + I/O queues over DMA pages, polled
-  completions) serving block reads over IPC into a client-provided DMA
-  buffer; `fs` — read-only FAT12/16/32 on top of `blk`, doubling as init;
+  ring 3 (IRQ 1 arrives on its endpoint, scancodes are read through a port
+  capability); `blk` — an NVMe driver in ring 3 (admin + I/O queues over DMA
+  pages, MSI-X completion interrupts, polling fallback) serving block reads
+  over IPC into a client-provided DMA buffer; `fs` — read-only FAT12/16/32 on
+  top of `blk`, doubling as init;
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
   grants to `ping` as a capability.
 - Services on the disk (`/SVC`): `hello`, and `flaky`, which dereferences NULL
@@ -144,9 +150,8 @@ limine.conf       bootloader configuration
 
 ## Roadmap (short)
 
-- HPET/TSC clock, inter-processor interrupts (TLB shootdown, remote reschedule).
-- IRQ capabilities (interrupt → endpoint) so drivers can stop polling;
-  asynchronous notifications.
+- Asynchronous notifications; IPIs (TLB shootdown, remote reschedule);
+  HPET/TSC clock.
 - A file-service protocol (open/read over IPC) so spawned services can read
   files themselves; passing capabilities to spawned services; a service
   manifest on disk instead of "everything in /SVC".

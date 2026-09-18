@@ -9,7 +9,6 @@ use super::{gdt, trap};
 
 pub const IRQ_BASE: u8 = 32;
 pub const IRQ_TIMER: u8 = IRQ_BASE;
-pub const IRQ_KEYBOARD: u8 = IRQ_BASE + 1;
 
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 

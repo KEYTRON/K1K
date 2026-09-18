@@ -89,9 +89,8 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     match vector {
         0..=31 => exception(frame),
         idt::IRQ_TIMER => interrupts::on_timer(),
-        idt::IRQ_KEYBOARD => interrupts::on_keyboard_irq(),
         apic::SPURIOUS_VECTOR => {}
-        _ => apic::eoi(),
+        _ => super::irq::on_vector(vector),
     }
 }
 

@@ -39,6 +39,21 @@ fn mapper_for(pml4: PhysFrame) -> OffsetPageTable<'static> {
 pub fn init() {
     let (frame, _) = Cr3::read();
     *KERNEL_PML4.lock() = Some(frame);
+
+    // User address spaces copy the kernel half of the PML4 when they are
+    // created, so every kernel-half entry must already exist: later kernel
+    // mappings (heap, MMIO above 512 GiB, ...) then only add lower-level
+    // tables, which all address spaces share.
+    let pml4 = table_at(frame);
+    let mut added = 0;
+    for i in 256..512 {
+        if pml4[i].is_unused() {
+            let pdpt = pmm::alloc_zeroed_frame().expect("out of memory for kernel PDPTs");
+            pml4[i].set_frame(pdpt, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+            added += 1;
+        }
+    }
+    crate::klog!("vmm", "kernel PML4 ready ({} PDPTs pre-populated)", added);
 }
 
 /// Map `count` fresh frames at `start` in the kernel address space.

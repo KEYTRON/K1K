@@ -12,12 +12,12 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::VirtAddr;
 
-use crate::arch::x86_64::{context, gdt, interrupts as irq, pci};
-use crate::ipc::{self, Endpoint};
+use crate::arch::x86_64::{context, gdt, interrupts as irq, irq as irqobj, pci};
+use crate::ipc::Endpoint;
 use crate::klog;
 use crate::loader;
 use crate::mm::vmm::{AddressSpace, Flags, USER_STACK_TOP};
-use crate::obj::{Capability, DeviceObject, Object, Rights};
+use crate::obj::{Capability, DeviceObject, Object, PortRange, Rights};
 use crate::sched::{self, UserEntry, task::Task};
 
 const USER_STACK_PAGES: usize = 16;
@@ -88,10 +88,20 @@ pub fn init_builtin() {
     let rep = Endpoint::new();
     let blk_req = Endpoint::new();
 
+    // Keyboard driver: slot 0 = ISA IRQ 1, slot 1 = the 8042 ports 0x60..0x64.
     register(ServiceSpec {
         name: "kbd",
         image: KBD,
-        grants: alloc::vec![Grant::endpoint(&ipc::keyboard_endpoint(), Rights::RECV)],
+        grants: alloc::vec![
+            Grant {
+                object: Object::Irq(irqobj::isa(1)),
+                rights: Rights::RECV,
+            },
+            Grant {
+                object: Object::Port(PortRange { base: 0x60, len: 5 }),
+                rights: Rights::MAP_READ,
+            },
+        ],
         dynamic: false,
     });
 

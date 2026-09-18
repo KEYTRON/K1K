@@ -5,7 +5,7 @@
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{Ordering, fence};
 
-use k1k_rt::{Cap, Error, log, mem_create_dma, mem_map, mem_phys, sleep_ms};
+use k1k_rt::{Cap, Error, log, mem_create_dma, mem_map, mem_phys, recv, sleep_ms};
 
 const REG_CAP: usize = 0x00;
 const REG_VS: usize = 0x08;
@@ -68,6 +68,7 @@ pub struct Nvme {
     stride: usize,
     admin: Queue,
     io: Option<Queue>,
+    irq_ep: Option<Cap>,
     pub block_size: u32,
     pub blocks: u64,
     pub model: [u8; 40],
@@ -114,12 +115,15 @@ impl Nvme {
         Err(NvmeError::Timeout)
     }
 
-    pub fn init(regs: *mut u8) -> Result<Self, NvmeError> {
+    /// `irq_ep`: endpoint that receives the controller's MSI-X vector 0; when
+    /// absent, completions are polled.
+    pub fn init(regs: *mut u8, irq_ep: Option<Cap>) -> Result<Self, NvmeError> {
         let mut dev = Self {
             regs,
             stride: 0,
             admin: Queue::new(0)?,
             io: None,
+            irq_ep,
             block_size: 0,
             blocks: 0,
             model: [0; 40],
@@ -188,7 +192,8 @@ impl Nvme {
         cmd[6] = io.cq.phys as u32;
         cmd[7] = (io.cq.phys >> 32) as u32;
         cmd[10] = ((io.depth as u32 - 1) << 16) | io.id as u32;
-        cmd[11] = 1; // PC (physically contiguous), no interrupts
+        // PC (physically contiguous); IEN when we have an interrupt endpoint (vector 0).
+        cmd[11] = 1 | if dev.irq_ep.is_some() { 1 << 1 } else { 0 };
         dev.admin_cmd(&cmd)?;
         let mut cmd = [0u32; 16];
         cmd[0] = OPC_ADMIN_CREATE_IO_SQ as u32;
@@ -225,12 +230,33 @@ impl Nvme {
         let sq_db = DOORBELL_BASE + (2 * q.id as usize) * stride;
         unsafe { write_volatile(regs.add(sq_db) as *mut u32, q.sq_tail as u32) };
 
-        // Poll the completion queue for our entry.
-        for _ in 0..2_000_000u32 {
+        // Wait for our completion: sleep on the interrupt endpoint when we
+        // have one (a stale or coalesced interrupt just makes us re-check),
+        // otherwise spin.
+        let irq_ep = self.irq_ep;
+        let mut idle_spins = 0u32;
+        loop {
             let cqe = unsafe { q.cq.virt.add(q.cq_head * CQE_SIZE) as *const u32 };
             let dw3 = unsafe { read_volatile(cqe.add(3)) };
             let phase = ((dw3 >> 16) & 1) as u16;
-            if phase == q.phase {
+            if phase != q.phase {
+                match irq_ep {
+                    Some(ep) => {
+                        if recv(ep).is_err() {
+                            return Err(NvmeError::Timeout);
+                        }
+                    }
+                    None => {
+                        idle_spins += 1;
+                        if idle_spins > 2_000_000 {
+                            return Err(NvmeError::Timeout);
+                        }
+                        core::hint::spin_loop();
+                    }
+                }
+                continue;
+            }
+            {
                 let result = unsafe { read_volatile(cqe) };
                 let status = (dw3 >> 17) as u16;
                 let got_cid = (dw3 & 0xFFFF) as u16;
@@ -250,9 +276,7 @@ impl Nvme {
                     Err(NvmeError::Status(status))
                 };
             }
-            core::hint::spin_loop();
         }
-        Err(NvmeError::Timeout)
     }
 
     fn admin_cmd(&mut self, cmd: &[u32; 16]) -> Result<u32, NvmeError> {

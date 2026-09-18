@@ -4,6 +4,7 @@ pub mod context;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
+pub mod irq;
 pub mod pci;
 pub mod percpu;
 pub mod pic;

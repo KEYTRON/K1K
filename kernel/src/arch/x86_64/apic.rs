@@ -1,6 +1,6 @@
 //! Local APIC (timer, EOI) and I/O APIC (IRQ routing).
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use x86_64::PhysAddr;
 
 use super::{acpi, pit};
@@ -23,6 +23,7 @@ const DIV_16: u32 = 0b0011;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
+static BSP_LAPIC_ID: AtomicU8 = AtomicU8::new(0);
 static TICKS_PER_MS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
@@ -61,6 +62,7 @@ pub fn enable_local() {
 pub fn init_lapic() {
     let phys = acpi::madt().lapic_address;
     LAPIC_BASE.store(mmio(phys, 0x1000), Ordering::Relaxed);
+    BSP_LAPIC_ID.store(lapic_id(), Ordering::Relaxed);
     enable_local();
 
     lapic_write(LAPIC_TIMER_DIV, DIV_16);
@@ -144,24 +146,62 @@ pub fn init_ioapic() {
 }
 
 /// Route legacy ISA `irq` to `vector` on the BSP, honouring MADT overrides.
-pub fn route_isa_irq(irq: u8, vector: u8) {
+#[derive(Debug, Clone, Copy)]
+pub struct IsaRoute {
+    pub gsi: u32,
+    pub level: bool,
+}
+
+fn ioapic_for(gsi: u32) -> &'static IoApic {
+    IOAPICS
+        .get()
+        .expect("ioapic not initialised")
+        .iter()
+        .find(|io| gsi >= io.gsi_base && gsi < io.gsi_base + io.entries)
+        .expect("no ioapic covers gsi")
+}
+
+pub fn route_isa_irq(irq: u8, vector: u8) -> IsaRoute {
     let madt = acpi::madt();
     let ovr = madt.overrides.iter().find(|o| o.isa_irq == irq);
     let gsi = ovr.map(|o| o.gsi).unwrap_or(irq as u32);
+    let level = ovr.is_some_and(|o| o.level_triggered);
     let mut low = vector as u32;
     if ovr.is_some_and(|o| o.active_low) {
         low |= 1 << 13;
     }
-    if ovr.is_some_and(|o| o.level_triggered) {
+    if level {
         low |= 1 << 15;
     }
-    let dest = (lapic_id() as u32) << 24;
-
-    let ioapics = IOAPICS.get().expect("ioapic not initialised");
-    let io = ioapics
-        .iter()
-        .find(|io| gsi >= io.gsi_base && gsi < io.gsi_base + io.entries)
-        .expect("no ioapic covers gsi");
+    let dest = (bsp_lapic_id() as u32) << 24;
+    let io = ioapic_for(gsi);
     io.set_redirect(gsi - io.gsi_base, low, dest);
-    klog!("apic", "irq {} -> gsi {} -> vector {}", irq, gsi, vector);
+    klog!(
+        "apic",
+        "irq {} -> gsi {} -> vector {}{}",
+        irq,
+        gsi,
+        vector,
+        if level { " (level)" } else { "" }
+    );
+    IsaRoute { gsi, level }
+}
+
+/// Mask or unmask one I/O APIC input without touching its routing.
+pub fn set_gsi_mask(gsi: u32, masked: bool) {
+    let io = ioapic_for(gsi);
+    let reg = 0x10 + (gsi - io.gsi_base) * 2;
+    let low = io.read(reg);
+    io.write(
+        reg,
+        if masked {
+            low | LVT_MASKED
+        } else {
+            low & !LVT_MASKED
+        },
+    );
+}
+
+pub fn bsp_lapic_id() -> u8 {
+    BSP_LAPIC_ID.load(Ordering::Relaxed)
 }

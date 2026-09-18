@@ -9,6 +9,7 @@ pub const TIMER_HZ: u32 = 1000;
 pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Bootstrap processor: discover the interrupt hardware and start the timer.
+/// Device interrupts are routed later, when a driver asks for them (`irq.rs`).
 pub fn init() {
     let rsdp = crate::boot::BOOT_RSDP
         .response()
@@ -18,9 +19,8 @@ pub fn init() {
     pic::disable();
     apic::init_lapic();
     apic::init_ioapic();
-    apic::route_isa_irq(1, idt::IRQ_KEYBOARD);
     init_local();
-    klog!("irq", "lapic timer @ {} Hz, keyboard via ioapic", TIMER_HZ);
+    klog!("irq", "lapic timer @ {} Hz", TIMER_HZ);
 }
 
 /// Per-CPU part: harden CR4 and start this CPU's timer.
@@ -49,10 +49,4 @@ pub fn on_timer() {
     }
     apic::eoi();
     crate::sched::on_tick();
-}
-
-pub fn on_keyboard_irq() {
-    let scancode: u8 = unsafe { x86_64::instructions::port::Port::new(0x60).read() };
-    apic::eoi();
-    crate::sched::on_keyboard(scancode);
 }

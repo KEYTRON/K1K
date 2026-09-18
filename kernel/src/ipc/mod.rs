@@ -1,5 +1,5 @@
 //! Synchronous message-passing endpoints — the only way tasks talk to each
-//! other or to the kernel's device services. A message may carry one
+//! other, to drivers, or receive device interrupts. A message may carry one
 //! capability, which is how authority is delegated between tasks.
 
 use alloc::collections::VecDeque;
@@ -112,27 +112,5 @@ impl Endpoint {
                 return m;
             }
         }
-    }
-}
-
-/// Kernel-owned endpoint fed by the keyboard IRQ: a tiny "driver as a
-/// message source" so tasks can receive scancodes over IPC.
-static KEYBOARD_EP: Mutex<Option<Arc<Endpoint>>> = Mutex::new(None);
-
-pub fn init() {
-    *KEYBOARD_EP.lock() = Some(Endpoint::new());
-}
-
-pub fn keyboard_endpoint() -> Arc<Endpoint> {
-    KEYBOARD_EP
-        .lock()
-        .as_ref()
-        .expect("ipc not initialised")
-        .clone()
-}
-
-pub fn on_keyboard(scancode: u8) {
-    if let Some(ep) = KEYBOARD_EP.lock().as_ref() {
-        let _ = ep.send(Message::new(0, [scancode as u64, 0, 0, 0]));
     }
 }

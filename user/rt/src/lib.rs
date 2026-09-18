@@ -27,6 +27,11 @@ pub mod sys {
     pub const DEV_INFO: u64 = 14;
     pub const DEV_MAP: u64 = 15;
     pub const SPAWN: u64 = 16;
+    pub const IRQ_BIND: u64 = 17;
+    pub const IRQ_ACK: u64 = 18;
+    pub const DEV_IRQ: u64 = 19;
+    pub const PORT_IN: u64 = 20;
+    pub const PORT_OUT: u64 = 21;
 }
 
 /// Wire protocol of the `blk` block-device service.
@@ -259,6 +264,44 @@ pub fn dev_info(cap: Cap) -> Result<DevInfo> {
 /// Map a device's memory BAR (uncached); returns its base address.
 pub fn dev_map(cap: Cap, bar: usize) -> Result<*mut u8> {
     check(syscall(sys::DEV_MAP, cap.0 as u64, bar as u64, 0, 0)).map(|va| va as *mut u8)
+}
+
+/// Route an interrupt object's events to `ep` as messages `[vector, count]`.
+pub fn irq_bind(irq: Cap, ep: Cap) -> Result<()> {
+    check(syscall(sys::IRQ_BIND, irq.0 as u64, ep.0 as u64, 0, 0)).map(|_| ())
+}
+
+/// Re-arm a level-triggered interrupt after servicing the device.
+pub fn irq_ack(irq: Cap) -> Result<()> {
+    check(syscall(sys::IRQ_ACK, irq.0 as u64, 0, 0, 0)).map(|_| ())
+}
+
+/// Obtain an interrupt object (MSI-X entry 0) for a device we hold.
+pub fn dev_irq(dev: Cap) -> Result<Cap> {
+    check(syscall(sys::DEV_IRQ, dev.0 as u64, 0, 0, 0)).map(|s| Cap(s as u32))
+}
+
+/// Read `width` (1/2/4) bytes from port `offset` within a port capability.
+pub fn port_in(ports: Cap, offset: u16, width: u8) -> Result<u32> {
+    check(syscall(
+        sys::PORT_IN,
+        ports.0 as u64,
+        offset as u64,
+        width as u64,
+        0,
+    ))
+    .map(|v| v as u32)
+}
+
+pub fn port_out(ports: Cap, offset: u16, width: u8, value: u32) -> Result<()> {
+    check(syscall(
+        sys::PORT_OUT,
+        ports.0 as u64,
+        offset as u64,
+        width as u64,
+        value as u64,
+    ))
+    .map(|_| ())
 }
 
 /// Start a supervised service from the ELF image in `image` (`size` bytes).

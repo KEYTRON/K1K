@@ -4,6 +4,7 @@
 
 use alloc::vec::Vec;
 use spin::Once;
+use x86_64::PhysAddr;
 use x86_64::instructions::port::Port;
 
 use crate::klog;
@@ -188,6 +189,72 @@ pub fn find(class: u8, subclass: u8) -> Option<PciDevice> {
 pub fn enable(d: &PciDevice) {
     let cmd = read32(d.bus, d.slot, d.func, 0x04);
     write32(d.bus, d.slot, d.func, 0x04, cmd | 0x6);
+}
+
+fn read16(d: &PciDevice, off: u8) -> u16 {
+    (read32(d.bus, d.slot, d.func, off) >> ((off & 2) * 8)) as u16
+}
+
+fn write16(d: &PciDevice, off: u8, v: u16) {
+    let shift = (off & 2) * 8;
+    let old = read32(d.bus, d.slot, d.func, off);
+    let new = (old & !(0xFFFF << shift)) | (v as u32) << shift;
+    write32(d.bus, d.slot, d.func, off, new);
+}
+
+/// Walk the capability list for `id`; returns the capability's offset.
+fn find_capability(d: &PciDevice, id: u8) -> Option<u8> {
+    let status = read16(d, 0x06);
+    if status & 0x10 == 0 {
+        return None;
+    }
+    let mut ptr = (read32(d.bus, d.slot, d.func, 0x34) & 0xFC) as u8;
+    for _ in 0..48 {
+        if ptr == 0 {
+            return None;
+        }
+        let hdr = read32(d.bus, d.slot, d.func, ptr);
+        if (hdr & 0xFF) as u8 == id {
+            return Some(ptr);
+        }
+        ptr = ((hdr >> 8) & 0xFC) as u8;
+    }
+    None
+}
+
+/// Point MSI-X table entry `index` at `vector` on `lapic_id` and enable MSI-X.
+/// The table lives in one of the function's BARs, reached through the HHDM.
+pub fn msix_enable(d: &PciDevice, index: u32, vector: u8, lapic_id: u8) -> Option<()> {
+    let cap = find_capability(d, 0x11)?;
+    let ctrl = read16(d, cap + 2);
+    let table_size = (ctrl & 0x7FF) as u32 + 1;
+    if index >= table_size {
+        return None;
+    }
+    let table = read32(d.bus, d.slot, d.func, cap + 4);
+    let bir = (table & 0x7) as usize;
+    let offset = (table & !0x7) as u64;
+    let bar = d.bars.get(bir)?;
+    if bar.size == 0 || bar.io {
+        return None;
+    }
+    let phys = bar.base + offset;
+    crate::mm::vmm::map_mmio(PhysAddr::new(phys), table_size as u64 * 16);
+    let entry =
+        crate::mm::pmm::phys_to_virt(PhysAddr::new(phys + index as u64 * 16)).as_mut_ptr::<u32>();
+    unsafe {
+        entry
+            .add(0)
+            .write_volatile(0xFEE0_0000 | (lapic_id as u32) << 12);
+        entry.add(1).write_volatile(0);
+        entry.add(2).write_volatile(vector as u32);
+        entry.add(3).write_volatile(0); // unmasked
+    }
+    // Enable MSI-X, clear the function mask; INTx is no longer needed.
+    write16(d, cap + 2, (ctrl | 0x8000) & !0x4000);
+    let cmd = read32(d.bus, d.slot, d.func, 0x04);
+    write32(d.bus, d.slot, d.func, 0x04, cmd | 1 << 10);
+    Some(())
 }
 
 fn class_name(class: u8, sub: u8) -> &'static str {

@@ -6,7 +6,10 @@
 
 mod nvme;
 
-use k1k_rt::{Cap, blkproto as proto, dev_info, dev_map, exit, log, mem_map, mem_phys, recv, send};
+use k1k_rt::{
+    Cap, blkproto as proto, dev_info, dev_irq, dev_map, ep_create, exit, irq_bind, log, mem_map,
+    mem_phys, recv, send,
+};
 
 const DEVICE: Cap = Cap(0);
 const REQUESTS: Cap = Cap(1);
@@ -53,7 +56,27 @@ fn main() -> ! {
         }
     };
 
-    let mut dev = match nvme::Nvme::init(regs) {
+    // Completion interrupts: MSI-X entry 0 → our endpoint. Bound before the
+    // controller is enabled so no completion can be missed; without it the
+    // driver falls back to polling.
+    let irq_ep = match (dev_irq(DEVICE), ep_create()) {
+        (Ok(irq), Ok(ep)) => match irq_bind(irq, ep) {
+            Ok(()) => {
+                log!("completion interrupts via MSI-X (irq cap {:?})", irq);
+                Some(ep)
+            }
+            Err(e) => {
+                log!("irq_bind failed ({:?}), polling", e);
+                None
+            }
+        },
+        (irq, ep) => {
+            log!("no interrupt object ({:?} / {:?}), polling", irq, ep);
+            None
+        }
+    };
+
+    let mut dev = match nvme::Nvme::init(regs, irq_ep) {
         Ok(d) => d,
         Err(e) => {
             log!("nvme init failed: {:?}", e);

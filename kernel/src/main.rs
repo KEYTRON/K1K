@@ -109,7 +109,6 @@ unsafe extern "C" fn kmain() -> ! {
     klog!("k1k", "milestone 2 reached: pmm + vmm + heap");
 
     sched::init();
-    ipc::init();
     arch::x86_64::syscall::init();
     arch::x86_64::interrupts::init();
     arch::x86_64::interrupts::enable();

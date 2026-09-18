@@ -5,6 +5,7 @@
 use core::ptr::addr_of_mut;
 use limine::memmap::{Entry, MEMMAP_BOOTLOADER_RECLAIMABLE, MEMMAP_USABLE};
 use spin::Mutex;
+use x86_64::instructions::interrupts;
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -104,12 +105,14 @@ pub struct Stats {
 }
 
 pub fn stats() -> Stats {
-    let g = PMM.lock();
-    let b = g.as_ref().expect("pmm not initialised");
-    Stats {
-        total_usable_kib: b.total_usable * 4,
-        free_kib: b.free * 4,
-    }
+    interrupts::without_interrupts(|| {
+        let g = PMM.lock();
+        let b = g.as_ref().expect("pmm not initialised");
+        Stats {
+            total_usable_kib: b.total_usable * 4,
+            free_kib: b.free * 4,
+        }
+    })
 }
 
 pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
@@ -183,11 +186,11 @@ pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
         reclaimable / 1024
     );
 
-    *PMM.lock() = Some(bm);
+    interrupts::without_interrupts(|| *PMM.lock() = Some(bm));
 }
 
 pub fn alloc_frame() -> Option<PhysFrame> {
-    let idx = PMM.lock().as_mut()?.alloc()?;
+    let idx = interrupts::without_interrupts(|| PMM.lock().as_mut()?.alloc())?;
     Some(PhysFrame::containing_address(PhysAddr::new(
         idx as u64 * FRAME_SIZE,
     )))
@@ -208,7 +211,7 @@ pub fn alloc_zeroed_frame() -> Option<PhysFrame> {
 
 /// Allocate `count` physically contiguous zeroed frames; returns the first.
 pub fn alloc_contiguous_zeroed(count: usize) -> Option<PhysFrame> {
-    let idx = PMM.lock().as_mut()?.alloc_contiguous(count)?;
+    let idx = interrupts::without_interrupts(|| PMM.lock().as_mut()?.alloc_contiguous(count))?;
     let first = PhysFrame::containing_address(PhysAddr::new(idx as u64 * FRAME_SIZE));
     unsafe {
         core::ptr::write_bytes(
@@ -222,9 +225,11 @@ pub fn alloc_contiguous_zeroed(count: usize) -> Option<PhysFrame> {
 
 pub fn free_frame(frame: PhysFrame) {
     let idx = (frame.start_address().as_u64() / FRAME_SIZE) as usize;
-    if let Some(bm) = PMM.lock().as_mut() {
-        bm.release(idx);
-    }
+    interrupts::without_interrupts(|| {
+        if let Some(bm) = PMM.lock().as_mut() {
+            bm.release(idx);
+        }
+    });
 }
 
 /// Adapter so the paging code can pull frames straight from the PMM.

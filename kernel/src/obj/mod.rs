@@ -10,6 +10,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use x86_64::structures::paging::PhysFrame;
 
+use crate::arch::x86_64::irq::IrqObject;
 use crate::arch::x86_64::pci::PciDevice;
 use crate::ipc::Endpoint;
 use crate::mm::pmm;
@@ -102,11 +103,20 @@ pub struct DeviceObject {
     pub pci: PciDevice,
 }
 
+/// A range of x86 I/O ports a driver may touch.
+#[derive(Clone, Copy, Debug)]
+pub struct PortRange {
+    pub base: u16,
+    pub len: u16,
+}
+
 #[derive(Clone)]
 pub enum Object {
     Endpoint(Arc<Endpoint>),
     Memory(Arc<MemoryObject>),
     Device(Arc<DeviceObject>),
+    Irq(Arc<IrqObject>),
+    Port(PortRange),
     /// Kernel control authority (spawning services); held by init-like tasks.
     Control,
 }
@@ -133,6 +143,18 @@ impl Capability {
     pub fn device(&self) -> Option<&Arc<DeviceObject>> {
         match &self.object {
             Object::Device(d) => Some(d),
+            _ => None,
+        }
+    }
+    pub fn irq(&self) -> Option<&Arc<IrqObject>> {
+        match &self.object {
+            Object::Irq(i) => Some(i),
+            _ => None,
+        }
+    }
+    pub fn port(&self) -> Option<PortRange> {
+        match &self.object {
+            Object::Port(p) => Some(*p),
             _ => None,
         }
     }

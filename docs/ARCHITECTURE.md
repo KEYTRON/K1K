@@ -47,8 +47,10 @@ Every IDT vector points at a generated asm stub (`trap_stubs.s`) that pushes
 `(error code, vector)`, saves all general-purpose registers, does `swapgs` if
 the trap came from ring 3, and calls `trap_dispatch(&mut TrapFrame)`
 (`trap.rs`). The dispatcher routes exceptions (kill the user task or panic),
-the timer and keyboard vectors, and acknowledges anything else. On the way
-out the stub swaps GS back for ring-3 frames and `iretq`s.
+the timer vector (32), and hands every other vector to `irq::on_vector`, which
+forwards it to the bound endpoint (if any) and acknowledges it. Vector layout:
+32 timer, 34..49 ISA IRQs 0..15, 64..127 MSI-X, 255 spurious. On the way out
+the stub swaps GS back for ring-3 frames and `iretq`s.
 
 ## Memory
 
@@ -118,11 +120,20 @@ away inside a single interrupts-off section, so a sender on another CPU cannot
 lose the wake-up. Wall time advances only on the BSP's timer tick; every CPU's
 tick drives its own preemption.
 
+Lock discipline: every spinlock that an interrupt handler may take — the
+scheduler, endpoints, the interrupt table, the console — and every lock that
+code holding one of those may take — the kernel heap and the PMM — is only
+ever held with interrupts disabled. Otherwise CPU A could hold the heap with
+interrupts on, take a timer tick, and spin on the scheduler lock held by CPU
+B, which is itself waiting for the heap. The heap allocator wrapper and the
+PMM entry points disable interrupts for exactly that reason, and the tick
+handler wakes sleepers without allocating.
+
 ## Objects, capabilities, IPC
 
 ```
 Task ── CapTable ── [slot] ── Capability { object, rights }
-                                 object: Endpoint | Memory | Device | Control
+                                 object: Endpoint | Memory | Device | Irq | Port | Control
                                  rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE | DMA | SPAWN
 ```
 
@@ -153,6 +164,15 @@ function is granted). `dev_info` describes it; `dev_map` maps a memory BAR
 uncached into the caller's address space. Device pages are tracked like shared
 pages so teardown never tries to free MMIO "frames".
 
+`IrqObject` (`arch/x86_64/irq.rs`) stands for one interrupt vector: either a
+legacy ISA line routed through the I/O APIC (`irq::isa`) or a PCI function's
+MSI-X entry 0 pointed at a fresh vector (`irq::msix`, obtained by a driver
+with `dev_irq`). `irq_bind` attaches an endpoint; every interrupt then becomes
+a message `[vector, count]` on it, sent from the trap path after the APIC EOI.
+Level-triggered lines are masked at the I/O APIC until the driver calls
+`irq_ack`. `Port` capabilities grant a range of x86 I/O ports for
+`port_in`/`port_out` (the 8042 keyboard controller lives at `0x60..0x64`).
+
 `Control` is the kernel's own authority object; a capability to it with
 `SPAWN` lets a task turn an ELF image held in a memory object into a new
 supervised service (`spawn`). Only `fs` holds one.
@@ -161,12 +181,17 @@ supervised service (`spawn`). Only `fs` holds one.
 
 The kernel contains no device protocol and no file system:
 
-- `kbd`: the IRQ handler only pushes scancodes into an endpoint; decoding
-  lives in the service, which holds the `RECV` capability.
+- `kbd`: holds the interrupt object for ISA IRQ 1 and a port capability for
+  the 8042. It creates an endpoint, binds the interrupt to it, and on each
+  message drains the controller's output buffer through `port_in` and decodes
+  scancode set 1. Nothing about keyboards exists in ring 0.
 - `blk`: an NVMe driver. It receives the controller as a `Device` capability,
-  maps BAR0, allocates DMA pages for the admin and I/O queues, identifies the
-  controller and namespace, and serves block reads to clients — polled
-  completions for now (IRQ capabilities are the next step). A client attaches
+  maps BAR0, asks for its MSI-X interrupt (`dev_irq`) and binds it to an
+  endpoint *before* enabling the controller, allocates DMA pages for the admin
+  and I/O queues (created with interrupts enabled on vector 0), identifies the
+  controller and namespace, and serves block reads — sleeping on the interrupt
+  endpoint while a command is in flight, with a polling fallback if no
+  interrupt object is available. A client attaches
   a DMA buffer (`REGISTER_BUF`, capability attached, page count in the high
   half of word 0) and a reply endpoint (`SET_REPLY`), then sends `READ lba
   count`; `blk` answers `status, blocks, block_size` after DMA-ing into the
@@ -229,6 +254,11 @@ wrappers in `user/rt` (`k1k-rt`).
 | 14 | `dev_info` | `slot, buf[14×u64]` | 0, `EPERM`, `EFAULT` |
 | 15 | `dev_map` | `slot, bar` | base address, `EPERM`, `EINVAL`, `ENOMEM` |
 | 16 | `spawn` | `ctl_slot, mem_slot, size, name_ptr \| len<<48` | new task id, `EPERM`, `EINVAL`, `EFAULT` |
+| 17 | `irq_bind` | `irq_slot, ep_slot` | 0, `EPERM` |
+| 18 | `irq_ack` | `irq_slot` | 0, `EPERM` |
+| 19 | `dev_irq` | `dev_slot` | new irq slot (`RECV|GRANT`), `EPERM`, `EINVAL` |
+| 20 | `port_in` | `port_slot, offset, width` | value, `EPERM`, `EINVAL` |
+| 21 | `port_out` | `port_slot, offset, width, value` | 0, `EPERM`, `EINVAL` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

@@ -278,16 +278,16 @@ pub fn on_tick() {
     let now = irq::ticks();
     let cur = current_id();
     let mut s = SCHED.lock();
-    let mut woke = alloc::vec::Vec::new();
-    for (id, t) in s.tasks.iter_mut() {
+    // Disjoint field borrows: wake sleepers without allocating in IRQ context.
+    let sched = &mut *s;
+    for (id, t) in sched.tasks.iter_mut() {
         if t.state == State::Sleeping && t.sleep_until <= now {
             t.state = State::Ready;
             if t.on_cpu.is_none() {
-                woke.push(*id);
+                sched.ready.push_back(*id);
             }
         }
     }
-    s.ready.extend(woke);
 
     let preempt = match s.tasks.get_mut(&cur) {
         Some(t) => {
@@ -301,10 +301,6 @@ pub fn on_tick() {
     if preempt && has_ready {
         schedule();
     }
-}
-
-pub fn on_keyboard(scancode: u8) {
-    crate::ipc::on_keyboard(scancode);
 }
 
 pub fn on_user_fault(what: &str, code: u64, rip: u64) -> ! {

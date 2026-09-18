@@ -27,6 +27,11 @@ pub const SYS_MEM_PHYS: u64 = 13;
 pub const SYS_DEV_INFO: u64 = 14;
 pub const SYS_DEV_MAP: u64 = 15;
 pub const SYS_SPAWN: u64 = 16;
+pub const SYS_IRQ_BIND: u64 = 17;
+pub const SYS_IRQ_ACK: u64 = 18;
+pub const SYS_DEV_IRQ: u64 = 19;
+pub const SYS_PORT_IN: u64 = 20;
+pub const SYS_PORT_OUT: u64 = 21;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -338,6 +343,89 @@ fn sys_spawn(ctl_slot: u64, mem_slot: u64, size: u64, name: u64) -> i64 {
     }
 }
 
+/// Deliver an interrupt object's events to `ep_slot` (needs RECV on the irq).
+fn sys_irq_bind(irq_slot: u64, ep_slot: u64) -> i64 {
+    let Some(irq_obj) =
+        sched::with_current(|t| t.caps.lookup(irq_slot as u32, Rights::RECV)?.irq().cloned())
+    else {
+        return EPERM;
+    };
+    let Some(ep) = lookup_endpoint(ep_slot, Rights::SEND) else {
+        return EPERM;
+    };
+    irq_obj.bind(ep);
+    0
+}
+
+fn sys_irq_ack(irq_slot: u64) -> i64 {
+    let Some(irq_obj) =
+        sched::with_current(|t| t.caps.lookup(irq_slot as u32, Rights::RECV)?.irq().cloned())
+    else {
+        return EPERM;
+    };
+    irq_obj.ack();
+    0
+}
+
+/// Give the caller an interrupt object for a device it holds (MSI-X entry 0).
+fn sys_dev_irq(dev_slot: u64) -> i64 {
+    let need = Rights::MAP_READ.union(Rights::MAP_WRITE);
+    let Some(dev) =
+        sched::with_current(|t| t.caps.lookup(dev_slot as u32, need)?.device().cloned())
+    else {
+        return EPERM;
+    };
+    let Some(obj) = crate::arch::x86_64::irq::msix(&dev.pci) else {
+        return EINVAL;
+    };
+    insert_cap(Capability {
+        object: Object::Irq(obj),
+        rights: Rights::RECV.union(Rights::GRANT),
+    })
+}
+
+fn port_access(slot: u64, offset: u64, width: u64) -> Result<u16, i64> {
+    let Some(range) = sched::with_current(|t| t.caps.lookup(slot as u32, Rights::MAP_READ)?.port())
+    else {
+        return Err(EPERM);
+    };
+    if !matches!(width, 1 | 2 | 4) || offset + width > range.len as u64 {
+        return Err(EINVAL);
+    }
+    Ok(range.base + offset as u16)
+}
+
+fn sys_port_in(slot: u64, offset: u64, width: u64) -> i64 {
+    let port = match port_access(slot, offset, width) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    use x86_64::instructions::port::Port;
+    unsafe {
+        match width {
+            1 => Port::<u8>::new(port).read() as i64,
+            2 => Port::<u16>::new(port).read() as i64,
+            _ => Port::<u32>::new(port).read() as i64,
+        }
+    }
+}
+
+fn sys_port_out(slot: u64, offset: u64, width: u64, value: u64) -> i64 {
+    let port = match port_access(slot, offset, width) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    use x86_64::instructions::port::Port;
+    unsafe {
+        match width {
+            1 => Port::<u8>::new(port).write(value as u8),
+            2 => Port::<u16>::new(port).write(value as u16),
+            _ => Port::<u32>::new(port).write(value as u32),
+        }
+    }
+    0
+}
+
 fn sys_info(buf: u64) -> i64 {
     let words = [irq::uptime_ms(), sched::current_id() as u64];
     match copy_to_user(buf, &words_to_bytes(&words)) {
@@ -372,6 +460,11 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_DEV_INFO => sys_dev_info(a0, a1),
         SYS_DEV_MAP => sys_dev_map(a0, a1),
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
+        SYS_IRQ_BIND => sys_irq_bind(a0, a1),
+        SYS_IRQ_ACK => sys_irq_ack(a0),
+        SYS_DEV_IRQ => sys_dev_irq(a0),
+        SYS_PORT_IN => sys_port_in(a0, a1, a2),
+        SYS_PORT_OUT => sys_port_out(a0, a1, a2, a3),
         _ => {
             let name = sched::with_current(|t| t.name);
             klog!("sys", "task '{}' invoked unknown syscall {}", name, nr);
