@@ -45,11 +45,9 @@ impl FbConsole {
     }
 
     pub fn rgb(&self, r: u8, g: u8, b: u8) -> u32 {
-        ((r as u32) << self.shifts.0) | ((g as u32) << self.shifts.1) | ((b as u32) << self.shifts.2)
-    }
-
-    pub fn set_fg(&mut self, r: u8, g: u8, b: u8) {
-        self.fg = self.rgb(r, g, b);
+        ((r as u32) << self.shifts.0)
+            | ((g as u32) << self.shifts.1)
+            | ((b as u32) << self.shifts.2)
     }
 
     #[inline]

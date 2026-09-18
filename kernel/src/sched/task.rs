@@ -43,7 +43,12 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new_kernel(id: TaskId, name: &'static str, entry: extern "C" fn(u64), arg: u64) -> Box<Self> {
+    pub fn new_kernel(
+        id: TaskId,
+        name: &'static str,
+        entry: extern "C" fn(u64),
+        arg: u64,
+    ) -> Box<Self> {
         let kstack = vec![0u8; KSTACK_SIZE].into_boxed_slice();
         let top = kstack.as_ptr() as u64 + KSTACK_SIZE as u64;
         let ctx_sp = unsafe { context::init_stack(top, entry as usize as u64, arg) };

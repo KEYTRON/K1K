@@ -1,0 +1,43 @@
+name: K1K CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm xorriso qemu-system-x86
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, rustfmt, clippy
+          targets: x86_64-unknown-none
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kernel
+
+      - name: Check formatting
+        run: cd kernel && cargo fmt --check
+
+      - name: Build kernel
+        run: make kernel
+
+      - name: Boot test in QEMU
+        run: make test
+
+      - name: Upload serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log
+          path: build/serial.log

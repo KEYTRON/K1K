@@ -10,6 +10,7 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 const IST_STACK_SIZE: usize = 32 * 1024;
 
 #[repr(align(16))]
+#[allow(dead_code)]
 struct Stack([u8; IST_STACK_SIZE]);
 
 static mut DF_STACK: Stack = Stack([0; IST_STACK_SIZE]);
@@ -22,7 +23,6 @@ pub struct Selectors {
     pub kernel_data: SegmentSelector,
     pub user_data: SegmentSelector,
     pub user_code: SegmentSelector,
-    pub tss: SegmentSelector,
 }
 
 static mut SELECTORS: Option<Selectors> = None;
@@ -38,7 +38,8 @@ fn stack_top(stack: *mut Stack) -> VirtAddr {
 pub fn init() {
     unsafe {
         let tss = &mut *addr_of_mut!(TSS);
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_top(addr_of_mut!(DF_STACK));
+        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
+            stack_top(addr_of_mut!(DF_STACK));
 
         let gdt = &mut *addr_of_mut!(GDT);
         let kernel_code = gdt.append(Descriptor::kernel_code_segment());
@@ -59,7 +60,6 @@ pub fn init() {
             kernel_data,
             user_data,
             user_code,
-            tss: tss_sel,
         });
     }
 }

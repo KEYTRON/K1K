@@ -15,9 +15,14 @@ pub fn init() {
     let sel = gdt::selectors();
     unsafe {
         Efer::update(|f| f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
-        Star::write(sel.user_code, sel.user_data, sel.kernel_code, sel.kernel_data)
-            .expect("GDT layout incompatible with sysret");
-        LStar::write(VirtAddr::new(syscall_entry as usize as u64));
+        Star::write(
+            sel.user_code,
+            sel.user_data,
+            sel.kernel_code,
+            sel.kernel_data,
+        )
+        .expect("GDT layout incompatible with sysret");
+        LStar::write(VirtAddr::new(syscall_entry as *const () as u64));
         SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG | RFlags::TRAP_FLAG);
     }
 }

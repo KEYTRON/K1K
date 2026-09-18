@@ -7,7 +7,6 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(allocator_api)]
 
 extern crate alloc;
 
@@ -44,12 +43,27 @@ unsafe extern "C" fn kmain() -> ! {
     if let Some(info) = boot::BOOTLOADER_INFO.response() {
         klog!("boot", "bootloader: {} {}", info.name(), info.version());
     }
-    if let Some(fb) = boot::FRAMEBUFFER.response().and_then(|r| r.framebuffers().first().copied()) {
-        klog!("boot", "framebuffer: {}x{} bpp={} pitch={}", fb.width, fb.height, fb.bpp, fb.pitch);
+    if let Some(fb) = boot::FRAMEBUFFER
+        .response()
+        .and_then(|r| r.framebuffers().first().copied())
+    {
+        klog!(
+            "boot",
+            "framebuffer: {}x{} bpp={} pitch={}",
+            fb.width,
+            fb.height,
+            fb.bpp,
+            fb.pitch
+        );
     }
     klog!("boot", "hhdm offset: {:#x}", boot::hhdm_offset());
     if let Some(ea) = boot::EXEC_ADDR.response() {
-        klog!("boot", "kernel phys={:#x} virt={:#x}", ea.physical_base, ea.virtual_base);
+        klog!(
+            "boot",
+            "kernel phys={:#x} virt={:#x}",
+            ea.physical_base,
+            ea.virtual_base
+        );
     }
 
     klog!("cpu", "GDT/TSS/IDT loaded");
@@ -59,18 +73,34 @@ unsafe extern "C" fn kmain() -> ! {
     mm::init();
     {
         let st = mm::pmm::stats();
-        klog!("pmm", "usable {} MiB, free {} MiB", st.total_usable_kib / 1024, st.free_kib / 1024);
+        klog!(
+            "pmm",
+            "usable {} MiB, free {} MiB",
+            st.total_usable_kib / 1024,
+            st.free_kib / 1024
+        );
         let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
         for i in 0..100_000u64 {
             v.push(i * 3);
         }
         let b = alloc::boxed::Box::new([7u8; 4096]);
         let (used, free) = mm::heap::stats();
-        klog!("heap", "alloc ok: vec[99999]={} box[0]={} used={} KiB free={} KiB", v[99_999], b[0], used / 1024, free / 1024);
+        klog!(
+            "heap",
+            "alloc ok: vec[99999]={} box[0]={} used={} KiB free={} KiB",
+            v[99_999],
+            b[0],
+            used / 1024,
+            free / 1024
+        );
         drop(v);
         drop(b);
         let asp = mm::vmm::AddressSpace::new().expect("address space");
-        klog!("vmm", "user address space created, cr3={:#x}", asp.cr3().start_address());
+        klog!(
+            "vmm",
+            "user address space created, cr3={:#x}",
+            asp.cr3().start_address()
+        );
         drop(asp);
         let st = mm::pmm::stats();
         klog!("pmm", "after teardown: free {} MiB", st.free_kib / 1024);
@@ -83,13 +113,26 @@ unsafe extern "C" fn kmain() -> ! {
     arch::x86_64::syscall::init();
     arch::x86_64::interrupts::init();
     arch::x86_64::interrupts::enable();
-    klog!("irq", "PIC remapped, PIT @ {} Hz, interrupts on", arch::x86_64::interrupts::TIMER_HZ);
+    klog!(
+        "irq",
+        "PIC remapped, PIT @ {} Hz, interrupts on",
+        arch::x86_64::interrupts::TIMER_HZ
+    );
     klog!("sys", "syscall/sysret enabled");
 
-    let ep = ipc::Endpoint::new("demo");
+    let ep = ipc::Endpoint::new();
+    sched::spawn_kernel("kbd-log", kthread_keyboard_log, 0);
     sched::spawn_kernel("kthread-a", kthread_ticker, 300);
-    sched::spawn_kernel("ipc-server", kthread_ipc_server, alloc::sync::Arc::into_raw(ep.clone()) as u64);
-    sched::spawn_kernel("ipc-client", kthread_ipc_client, alloc::sync::Arc::into_raw(ep) as u64);
+    sched::spawn_kernel(
+        "ipc-server",
+        kthread_ipc_server,
+        alloc::sync::Arc::into_raw(ep.clone()) as u64,
+    );
+    sched::spawn_kernel(
+        "ipc-client",
+        kthread_ipc_client,
+        alloc::sync::Arc::into_raw(ep) as u64,
+    );
 
     let sup = sched::spawn_kernel("supervisor", service::supervisor_main, 0);
     sched::set_supervisor(sup);
@@ -108,16 +151,33 @@ unsafe extern "C" fn kmain() -> ! {
         }
     }
 
-    klog!("k1k", "--- autotest summary at {} ms ---", arch::x86_64::interrupts::uptime_ms());
+    klog!(
+        "k1k",
+        "--- autotest summary at {} ms ---",
+        arch::x86_64::interrupts::uptime_ms()
+    );
     klog!("sched", "{} tasks in table:", sched::task_count());
     sched::dump();
     klog!("superv", "services:");
     service::dump();
-    let flaky_restarts = service::SERVICES.lock().iter().find(|s| s.spec.name == "flaky").map(|s| s.restarts).unwrap_or(0);
+    let flaky_restarts = service::SERVICES
+        .lock()
+        .iter()
+        .find(|s| s.spec.name == "flaky")
+        .map(|s| s.restarts)
+        .unwrap_or(0);
     let st = mm::pmm::stats();
-    klog!("pmm", "free {} MiB after {} flaky restarts", st.free_kib / 1024, flaky_restarts);
+    klog!(
+        "pmm",
+        "free {} MiB after {} flaky restarts",
+        st.free_kib / 1024,
+        flaky_restarts
+    );
     if flaky_restarts >= 2 {
-        klog!("k1k", "milestone 4 reached: ring 3 + syscalls + capabilities + self-healing supervisor");
+        klog!(
+            "k1k",
+            "milestone 4 reached: ring 3 + syscalls + capabilities + self-healing supervisor"
+        );
         arch::x86_64::qemu_exit(0x10);
     } else {
         klog!("k1k", "FAIL: flaky service was not restarted");
@@ -128,10 +188,28 @@ unsafe extern "C" fn kmain() -> ! {
 extern "C" fn kthread_ticker(period_ms: u64) {
     let (id, name) = sched::with_current(|t| (t.id, t.name));
     for i in 1..=3 {
-        klog!(name, "tick {} (task {}) at {} ms", i, id, arch::x86_64::interrupts::uptime_ms());
+        klog!(
+            name,
+            "tick {} (task {}) at {} ms",
+            i,
+            id,
+            arch::x86_64::interrupts::uptime_ms()
+        );
         sched::sleep_ms(period_ms);
     }
     klog!(name, "done, exiting");
+}
+
+/// Consumes the keyboard IRQ endpoint — the driver-as-message-source pattern.
+extern "C" fn kthread_keyboard_log(_: u64) {
+    let ep = ipc::keyboard_endpoint();
+    loop {
+        let m = ep.recv();
+        let sc = m.words[0];
+        if sc & 0x80 == 0 {
+            klog!("kbd", "key down scancode={:#04x}", sc);
+        }
+    }
 }
 
 extern "C" fn kthread_ipc_server(ep_raw: u64) {
@@ -147,7 +225,11 @@ extern "C" fn kthread_ipc_client(ep_raw: u64) {
     let me = sched::current_id();
     for i in 0..3u64 {
         sched::sleep_ms(200);
-        ep.send(ipc::Message { sender: me, words: [i, i * 10, 0xC0FFEE, 0] }).unwrap();
+        ep.send(ipc::Message {
+            sender: me,
+            words: [i, i * 10, 0xC0FFEE, 0],
+        })
+        .unwrap();
     }
 }
 

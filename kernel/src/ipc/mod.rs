@@ -25,7 +25,6 @@ struct EndpointInner {
 
 pub struct Endpoint {
     inner: Mutex<EndpointInner>,
-    pub name: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,10 +33,9 @@ pub enum IpcError {
 }
 
 impl Endpoint {
-    pub fn new(name: &'static str) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(EndpointInner::default()),
-            name,
         })
     }
 
@@ -92,26 +90,22 @@ impl Endpoint {
             }
         }
     }
-
-    pub fn try_recv(&self) -> Option<Message> {
-        interrupts::without_interrupts(|| self.inner.lock().queue.pop_front())
-    }
-
-    pub fn pending(&self) -> usize {
-        interrupts::without_interrupts(|| self.inner.lock().queue.len())
-    }
 }
 
 /// Kernel-owned endpoint fed by the keyboard IRQ: a tiny "driver as a
-/// message source" so user tasks can receive scancodes over IPC.
+/// message source" so tasks can receive scancodes over IPC.
 static KEYBOARD_EP: Mutex<Option<Arc<Endpoint>>> = Mutex::new(None);
 
 pub fn init() {
-    *KEYBOARD_EP.lock() = Some(Endpoint::new("keyboard"));
+    *KEYBOARD_EP.lock() = Some(Endpoint::new());
 }
 
 pub fn keyboard_endpoint() -> Arc<Endpoint> {
-    KEYBOARD_EP.lock().as_ref().expect("ipc not initialised").clone()
+    KEYBOARD_EP
+        .lock()
+        .as_ref()
+        .expect("ipc not initialised")
+        .clone()
 }
 
 pub fn on_keyboard(scancode: u8) {

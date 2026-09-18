@@ -2,8 +2,8 @@
 //! place) and per-task user address spaces that share the kernel half.
 
 use spin::Mutex;
-use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::mapper::{MapToError, UnmapError};
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{
     Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
@@ -40,7 +40,11 @@ pub fn init() {
 }
 
 /// Map `count` fresh frames at `start` in the kernel address space.
-pub fn map_kernel_pages(start: VirtAddr, count: usize, flags: PageTableFlags) -> Result<(), MapToError<Size4KiB>> {
+pub fn map_kernel_pages(
+    start: VirtAddr,
+    count: usize,
+    flags: PageTableFlags,
+) -> Result<(), MapToError<Size4KiB>> {
     let mut mapper = mapper_for(kernel_pml4());
     let mut alloc = GlobalFrameAllocator;
     for i in 0..count {
@@ -48,15 +52,16 @@ pub fn map_kernel_pages(start: VirtAddr, count: usize, flags: PageTableFlags) ->
         let frame = pmm::alloc_frame().ok_or(MapToError::FrameAllocationFailed)?;
         unsafe {
             mapper
-                .map_to(page, frame, flags | PageTableFlags::PRESENT | PageTableFlags::GLOBAL, &mut alloc)?
+                .map_to(
+                    page,
+                    frame,
+                    flags | PageTableFlags::PRESENT | PageTableFlags::GLOBAL,
+                    &mut alloc,
+                )?
                 .flush();
         }
     }
     Ok(())
-}
-
-pub fn translate_kernel(addr: VirtAddr) -> Option<PhysAddr> {
-    mapper_for(kernel_pml4()).translate_addr(addr)
 }
 
 /// A user address space. The kernel half (PML4 entries 256..512) is shared with
@@ -84,20 +89,23 @@ impl AddressSpace {
         Cr3::read().0 == self.pml4
     }
 
-    pub unsafe fn switch(&self) {
-        if !self.is_current() {
-            unsafe { Cr3::write(self.pml4, Cr3Flags::empty()) };
-        }
-    }
-
     /// Map a fresh zeroed frame at `page` with user permissions.
-    pub fn map_user_page(&mut self, page: Page, flags: PageTableFlags) -> Result<PhysFrame, MapToError<Size4KiB>> {
+    pub fn map_user_page(
+        &mut self,
+        page: Page,
+        flags: PageTableFlags,
+    ) -> Result<PhysFrame, MapToError<Size4KiB>> {
         let frame = pmm::alloc_zeroed_frame().ok_or(MapToError::FrameAllocationFailed)?;
         let mut mapper = mapper_for(self.pml4);
         let mut alloc = GlobalFrameAllocator;
         unsafe {
             mapper
-                .map_to(page, frame, flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE, &mut alloc)?
+                .map_to(
+                    page,
+                    frame,
+                    flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+                    &mut alloc,
+                )?
                 .ignore();
         }
         Ok(frame)
@@ -123,7 +131,9 @@ impl AddressSpace {
         let mut off = 0usize;
         while off < data.len() {
             let va = dst + off as u64;
-            let pa = mapper.translate_addr(va).expect("write_user: destination not mapped");
+            let pa = mapper
+                .translate_addr(va)
+                .expect("write_user: destination not mapped");
             let page_off = (va.as_u64() % pmm::FRAME_SIZE) as usize;
             let chunk = ((pmm::FRAME_SIZE as usize) - page_off).min(data.len() - off);
             unsafe {
@@ -150,14 +160,6 @@ impl AddressSpace {
             free_table_recursive(pml4[i].frame().ok(), 3);
             pml4[i].set_unused();
         }
-    }
-
-    pub fn unmap_user_page(&mut self, page: Page) -> Result<(), UnmapError> {
-        let mut mapper = mapper_for(self.pml4);
-        let (frame, flush) = mapper.unmap(page)?;
-        flush.ignore();
-        pmm::free_frame(frame);
-        Ok(())
     }
 }
 

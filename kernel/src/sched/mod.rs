@@ -54,7 +54,12 @@ pub fn current_id() -> TaskId {
 pub fn init() {
     let mut s = SCHED.lock();
     s.tasks.insert(IDLE_ID, Task::boot(IDLE_ID));
-    klog!("sched", "initialised (quantum {} ticks @ {} Hz)", QUANTUM_TICKS, irq::TIMER_HZ);
+    klog!(
+        "sched",
+        "initialised (quantum {} ticks @ {} Hz)",
+        QUANTUM_TICKS,
+        irq::TIMER_HZ
+    );
 }
 
 pub fn spawn_kernel(name: &'static str, entry: extern "C" fn(u64), arg: u64) -> TaskId {
@@ -110,7 +115,11 @@ pub fn schedule() {
                 }
                 None => {
                     let cur_state = s.tasks.get(&cur_id).map(|t| t.state);
-                    break if cur_state == Some(State::Running) { cur_id } else { IDLE_ID };
+                    break if cur_state == Some(State::Running) {
+                        cur_id
+                    } else {
+                        IDLE_ID
+                    };
                 }
             }
         };
@@ -130,14 +139,22 @@ pub fn schedule() {
             }
         }
 
-        let prev_sp_ptr = s.tasks.get_mut(&cur_id).map(|t| addr_of_mut!(t.ctx_sp)).unwrap_or(core::ptr::null_mut());
+        let prev_sp_ptr = s
+            .tasks
+            .get_mut(&cur_id)
+            .map(|t| addr_of_mut!(t.ctx_sp))
+            .unwrap_or(core::ptr::null_mut());
 
         let next = s.tasks.get_mut(&next_id).unwrap();
         next.state = State::Running;
         next.quantum_left = QUANTUM_TICKS;
         let next_sp = next.ctx_sp;
         let kstack_top = next.kstack_top();
-        let cr3 = next.addr_space.as_ref().map(|a| a.cr3()).unwrap_or_else(crate::mm::vmm::kernel_pml4);
+        let cr3 = next
+            .addr_space
+            .as_ref()
+            .map(|a| a.cr3())
+            .unwrap_or_else(crate::mm::vmm::kernel_pml4);
 
         CURRENT.store(next_id, Ordering::Relaxed);
         if kstack_top != 0 {
@@ -151,7 +168,11 @@ pub fn schedule() {
     };
 
     let mut scratch = 0u64;
-    let prev = if prev_sp_ptr.is_null() { &mut scratch as *mut u64 } else { prev_sp_ptr };
+    let prev = if prev_sp_ptr.is_null() {
+        &mut scratch as *mut u64
+    } else {
+        prev_sp_ptr
+    };
     unsafe { context::switch_context(prev, next_sp) };
 }
 
@@ -255,13 +276,29 @@ pub fn on_keyboard(scancode: u8) {
 
 pub fn on_user_fault(what: &str, code: u64, rip: u64) -> ! {
     let (id, name) = with_current(|t| (t.id, t.name));
-    klog!("fault", "task {} '{}' {} code={:#x} rip={:#x} -> killed", id, name, what, code, rip);
+    klog!(
+        "fault",
+        "task {} '{}' {} code={:#x} rip={:#x} -> killed",
+        id,
+        name,
+        what,
+        code,
+        rip
+    );
     exit_current(-1)
 }
 
 pub fn on_user_page_fault(addr: u64, code: u64, rip: u64) -> ! {
     let (id, name) = with_current(|t| (t.id, t.name));
-    klog!("fault", "task {} '{}' #PF addr={:#x} code={:#x} rip={:#x} -> killed", id, name, addr, code, rip);
+    klog!(
+        "fault",
+        "task {} '{}' #PF addr={:#x} code={:#x} rip={:#x} -> killed",
+        id,
+        name,
+        addr,
+        code,
+        rip
+    );
     exit_current(-1)
 }
 
@@ -273,7 +310,14 @@ pub fn dump() {
     interrupts::without_interrupts(|| {
         let s = SCHED.lock();
         for (id, t) in s.tasks.iter() {
-            klog!("sched", "  #{:<3} {:<12} {:?}{}", id, t.name, t.state, if t.is_user() { " (ring3)" } else { "" });
+            klog!(
+                "sched",
+                "  #{:<3} {:<12} {:?}{}",
+                id,
+                t.name,
+                t.state,
+                if t.is_user() { " (ring3)" } else { "" }
+            );
         }
     });
 }

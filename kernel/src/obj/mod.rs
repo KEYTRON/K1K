@@ -16,14 +16,9 @@ pub struct Rights(pub u32);
 impl Rights {
     pub const SEND: Rights = Rights(1 << 0);
     pub const RECV: Rights = Rights(1 << 1);
-    pub const GRANT: Rights = Rights(1 << 2);
-    pub const ALL: Rights = Rights(0b111);
 
     pub const fn contains(self, other: Rights) -> bool {
         self.0 & other.0 == other.0
-    }
-    pub const fn intersect(self, other: Rights) -> Rights {
-        Rights(self.0 & other.0)
     }
 }
 
@@ -66,22 +61,5 @@ impl CapTable {
     pub fn lookup(&self, slot: CapSlot, rights: Rights) -> Option<&Capability> {
         let cap = self.get(slot)?;
         cap.rights.contains(rights).then_some(cap)
-    }
-
-    /// Copy a capability into another table with (possibly reduced) rights.
-    pub fn derive(&self, slot: CapSlot, mask: Rights) -> Option<Capability> {
-        let cap = self.lookup(slot, Rights::GRANT)?;
-        Some(Capability {
-            object: cap.object.clone(),
-            rights: cap.rights.intersect(mask),
-        })
-    }
-
-    pub fn remove(&mut self, slot: CapSlot) -> Option<Capability> {
-        self.slots.get_mut(slot as usize)?.take()
-    }
-
-    pub fn len(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
     }
 }

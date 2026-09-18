@@ -7,8 +7,6 @@ pub mod pit;
 pub mod serial;
 pub mod syscall;
 
-use core::arch::asm;
-
 pub fn halt_loop() -> ! {
     loop {
         x86_64::instructions::hlt();
@@ -28,9 +26,4 @@ pub fn early_init() {
     serial::init();
     gdt::init();
     idt::init();
-}
-
-#[inline(always)]
-pub fn pause() {
-    unsafe { asm!("pause", options(nomem, nostack)) };
 }

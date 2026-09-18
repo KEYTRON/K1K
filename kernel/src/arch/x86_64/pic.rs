@@ -41,7 +41,11 @@ pub fn init(offset: u8) {
 
 pub fn unmask(irq: u8) {
     unsafe {
-        let (port, bit) = if irq < 8 { (PIC1_DATA, irq) } else { (PIC2_DATA, irq - 8) };
+        let (port, bit) = if irq < 8 {
+            (PIC1_DATA, irq)
+        } else {
+            (PIC2_DATA, irq - 8)
+        };
         let mut p = Port::<u8>::new(port);
         let v = p.read();
         p.write(v & !(1 << bit));

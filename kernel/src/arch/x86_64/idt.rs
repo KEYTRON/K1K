@@ -21,14 +21,16 @@ pub fn init() {
         idt.overflow.set_handler_fn(overflow);
         idt.bound_range_exceeded.set_handler_fn(bound_range);
         idt.invalid_opcode.set_handler_fn(invalid_opcode);
-        idt.device_not_available.set_handler_fn(device_not_available);
+        idt.device_not_available
+            .set_handler_fn(device_not_available);
         idt.double_fault
             .set_handler_fn(double_fault)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         idt.invalid_tss.set_handler_fn(invalid_tss);
         idt.segment_not_present.set_handler_fn(segment_not_present);
         idt.stack_segment_fault.set_handler_fn(stack_segment);
-        idt.general_protection_fault.set_handler_fn(general_protection);
+        idt.general_protection_fault
+            .set_handler_fn(general_protection);
         idt.page_fault.set_handler_fn(page_fault);
         idt.x87_floating_point.set_handler_fn(x87_fp);
         idt.alignment_check.set_handler_fn(alignment_check);
@@ -87,7 +89,11 @@ trap!(alignment_check, "#AC alignment check", code);
 trap!(simd_fp, "#XM SIMD floating point");
 
 extern "x86-interrupt" fn debug(frame: InterruptStackFrame) {
-    klog!("trap", "#DB debug at {:#x}", frame.instruction_pointer.as_u64());
+    klog!(
+        "trap",
+        "#DB debug at {:#x}",
+        frame.instruction_pointer.as_u64()
+    );
 }
 
 extern "x86-interrupt" fn nmi(frame: InterruptStackFrame) {
@@ -95,7 +101,11 @@ extern "x86-interrupt" fn nmi(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
-    klog!("trap", "#BP breakpoint at {:#x}", frame.instruction_pointer.as_u64());
+    klog!(
+        "trap",
+        "#BP breakpoint at {:#x}",
+        frame.instruction_pointer.as_u64()
+    );
 }
 
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, code: u64) -> ! {

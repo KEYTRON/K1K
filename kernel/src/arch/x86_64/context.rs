@@ -67,7 +67,7 @@ pub unsafe fn init_stack(stack_top: u64, entry: u64, arg: u64) -> u64 {
             r12: entry,
             rbx: 0,
             rbp: 0,
-            rip: task_trampoline as usize as u64,
+            rip: task_trampoline as *const () as u64,
         });
     }
     sp
@@ -83,11 +83,11 @@ pub unsafe extern "C" fn enter_user(_rip: u64, _rsp: u64, _user_cs: u64, _user_s
         "xor eax, eax",
         "mov fs, ax",
         "mov gs, ax",
-        "push rcx",        // ss
-        "push rsi",        // rsp
-        "push 0x202",      // rflags: IF set
-        "push rdx",        // cs
-        "push rdi",        // rip
+        "push rcx",   // ss
+        "push rsi",   // rsp
+        "push 0x202", // rflags: IF set
+        "push rdx",   // cs
+        "push rdi",   // rip
         "xor eax, eax",
         "xor ebx, ebx",
         "xor ecx, ecx",

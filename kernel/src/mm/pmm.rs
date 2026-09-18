@@ -24,11 +24,6 @@ pub fn phys_to_virt(p: PhysAddr) -> VirtAddr {
     VirtAddr::new(p.as_u64() + hhdm())
 }
 
-#[inline]
-pub fn virt_to_phys_hhdm(v: VirtAddr) -> PhysAddr {
-    PhysAddr::new(v.as_u64() - hhdm())
-}
-
 struct Bitmap {
     bits: &'static mut [u64],
     frames: usize,
@@ -71,26 +66,6 @@ impl Bitmap {
         None
     }
 
-    fn alloc_contiguous(&mut self, count: usize) -> Option<usize> {
-        let mut run = 0;
-        for i in 0..self.frames {
-            if self.is_used(i) {
-                run = 0;
-                continue;
-            }
-            run += 1;
-            if run == count {
-                let first = i + 1 - count;
-                for j in first..=i {
-                    self.set_used(j);
-                }
-                self.free -= count;
-                return Some(first);
-            }
-        }
-        None
-    }
-
     fn release(&mut self, i: usize) {
         debug_assert!(self.is_used(i), "double free of frame {i}");
         self.set_free(i);
@@ -106,7 +81,6 @@ static PMM: Mutex<Option<Bitmap>> = Mutex::new(None);
 pub struct Stats {
     pub total_usable_kib: usize,
     pub free_kib: usize,
-    pub used_kib: usize,
 }
 
 pub fn stats() -> Stats {
@@ -115,7 +89,6 @@ pub fn stats() -> Stats {
     Stats {
         total_usable_kib: b.total_usable * 4,
         free_kib: b.free * 4,
-        used_kib: (b.total_usable - b.free) * 4,
     }
 }
 
@@ -138,7 +111,10 @@ pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
     let words = frames.div_ceil(64);
     let bitmap_bytes = words * 8;
     let largest = largest.expect("no usable memory");
-    assert!(largest.length as usize >= bitmap_bytes, "largest region too small for bitmap");
+    assert!(
+        largest.length as usize >= bitmap_bytes,
+        "largest region too small for bitmap"
+    );
 
     let bits: &'static mut [u64] = unsafe {
         let p = phys_to_virt(PhysAddr::new(largest.base)).as_mut_ptr::<u64>();
@@ -192,21 +168,22 @@ pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
 
 pub fn alloc_frame() -> Option<PhysFrame> {
     let idx = PMM.lock().as_mut()?.alloc()?;
-    Some(PhysFrame::containing_address(PhysAddr::new(idx as u64 * FRAME_SIZE)))
+    Some(PhysFrame::containing_address(PhysAddr::new(
+        idx as u64 * FRAME_SIZE,
+    )))
 }
 
 /// Allocate a frame and zero it through the HHDM.
 pub fn alloc_zeroed_frame() -> Option<PhysFrame> {
     let f = alloc_frame()?;
     unsafe {
-        core::ptr::write_bytes(phys_to_virt(f.start_address()).as_mut_ptr::<u8>(), 0, FRAME_SIZE as usize);
+        core::ptr::write_bytes(
+            phys_to_virt(f.start_address()).as_mut_ptr::<u8>(),
+            0,
+            FRAME_SIZE as usize,
+        );
     }
     Some(f)
-}
-
-pub fn alloc_contiguous(count: usize) -> Option<PhysFrame> {
-    let idx = PMM.lock().as_mut()?.alloc_contiguous(count)?;
-    Some(PhysFrame::containing_address(PhysAddr::new(idx as u64 * FRAME_SIZE)))
 }
 
 pub fn free_frame(frame: PhysFrame) {

@@ -10,10 +10,10 @@ use x86_64::VirtAddr;
 
 use crate::arch::x86_64::{context, gdt, interrupts as irq};
 use crate::ipc::Endpoint;
+use crate::klog;
 use crate::mm::vmm::{AddressSpace, Flags, USER_CODE_BASE, USER_STACK_TOP};
 use crate::obj::{Capability, Object, Rights};
 use crate::sched::{self, UserEntry, task::Task};
-use crate::klog;
 
 const USER_STACK_PAGES: usize = 4;
 const MAX_RESTARTS_BEFORE_BACKOFF: u32 = 3;
@@ -56,25 +56,45 @@ pub fn register(spec: ServiceSpec) -> usize {
 
 /// Register the built-in demo services and wire their IPC capabilities.
 pub fn init_builtin() {
-    let req = Endpoint::new("ping.req");
-    let rep = Endpoint::new("ping.rep");
+    let req = Endpoint::new();
+    let rep = Endpoint::new();
 
-    register(ServiceSpec { name: "hello", image: HELLO, grants: Vec::new() });
-    register(ServiceSpec { name: "flaky", image: FLAKY, grants: Vec::new() });
+    register(ServiceSpec {
+        name: "hello",
+        image: HELLO,
+        grants: Vec::new(),
+    });
+    register(ServiceSpec {
+        name: "flaky",
+        image: FLAKY,
+        grants: Vec::new(),
+    });
     register(ServiceSpec {
         name: "pong",
         image: PONG,
         grants: alloc::vec![
-            Grant { endpoint: req.clone(), rights: Rights::RECV },
-            Grant { endpoint: rep.clone(), rights: Rights::SEND },
+            Grant {
+                endpoint: req.clone(),
+                rights: Rights::RECV
+            },
+            Grant {
+                endpoint: rep.clone(),
+                rights: Rights::SEND
+            },
         ],
     });
     register(ServiceSpec {
         name: "ping",
         image: PING,
         grants: alloc::vec![
-            Grant { endpoint: req, rights: Rights::SEND },
-            Grant { endpoint: rep, rights: Rights::RECV },
+            Grant {
+                endpoint: req,
+                rights: Rights::SEND
+            },
+            Grant {
+                endpoint: rep,
+                rights: Rights::RECV
+            },
         ],
     });
 }
@@ -98,10 +118,16 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
 
     let mut asp = AddressSpace::new()?;
     let code_pages = image.len().div_ceil(4096).max(1);
-    asp.map_user_range(VirtAddr::new(USER_CODE_BASE), code_pages, Flags::WRITABLE).ok()?;
+    asp.map_user_range(VirtAddr::new(USER_CODE_BASE), code_pages, Flags::WRITABLE)
+        .ok()?;
     asp.write_user(VirtAddr::new(USER_CODE_BASE), image);
     let stack_bottom = USER_STACK_TOP - (USER_STACK_PAGES as u64) * 4096;
-    asp.map_user_range(VirtAddr::new(stack_bottom), USER_STACK_PAGES, Flags::WRITABLE | Flags::NO_EXECUTE).ok()?;
+    asp.map_user_range(
+        VirtAddr::new(stack_bottom),
+        USER_STACK_PAGES,
+        Flags::WRITABLE | Flags::NO_EXECUTE,
+    )
+    .ok()?;
 
     let mut t: Box<Task> = Task::new_kernel(0, name, user_task_entry, 0);
     t.addr_space = Some(asp);
@@ -121,7 +147,14 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
 extern "C" fn user_task_entry(_: u64) {
     let entry = sched::with_current(|t| t.user.expect("user task without entry"));
     let sel = gdt::selectors();
-    unsafe { context::enter_user(entry.rip, entry.rsp, sel.user_code.0 as u64, sel.user_data.0 as u64) }
+    unsafe {
+        context::enter_user(
+            entry.rip,
+            entry.rsp,
+            sel.user_code.0 as u64,
+            sel.user_data.0 as u64,
+        )
+    }
 }
 
 pub fn start_all() {
@@ -139,7 +172,11 @@ pub fn start_all() {
 
 /// The supervisor thread: reaps dead tasks and restarts services.
 pub extern "C" fn supervisor_main(_: u64) {
-    klog!("superv", "supervisor running as task {}", sched::current_id());
+    klog!(
+        "superv",
+        "supervisor running as task {}",
+        sched::current_id()
+    );
     loop {
         while let Some(dead) = sched::take_dead() {
             let name = dead.name;
@@ -173,13 +210,23 @@ pub extern "C" fn supervisor_main(_: u64) {
                 reason,
                 code,
                 restarts,
-                if delay_ms > 0 { alloc::format!(", backoff {} ms", delay_ms) } else { alloc::string::String::new() }
+                if delay_ms > 0 {
+                    alloc::format!(", backoff {} ms", delay_ms)
+                } else {
+                    alloc::string::String::new()
+                }
             );
             if delay_ms > 0 {
                 sched::sleep_ms(delay_ms);
             }
             match spawn(idx) {
-                Some(id) => klog!("superv", "service '{}' back up as task {} at {} ms", name, id, irq::uptime_ms()),
+                Some(id) => klog!(
+                    "superv",
+                    "service '{}' back up as task {} at {} ms",
+                    name,
+                    id,
+                    irq::uptime_ms()
+                ),
                 None => klog!("superv", "service '{}' failed to respawn", name),
             }
         }

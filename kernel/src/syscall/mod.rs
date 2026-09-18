@@ -20,7 +20,6 @@ pub const SYS_INFO: u64 = 6;
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
 pub const EFAULT: i64 = -3;
-pub const EINVAL: i64 = -4;
 pub const ENOSYS: i64 = -5;
 
 const USER_TOP: u64 = 0x0000_8000_0000_0000;
@@ -32,7 +31,12 @@ fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 /// Translate a user virtual address through the current task's page tables.
 fn translate_user(va: u64) -> Option<u64> {
-    sched::with_current(|t| t.addr_space.as_ref()?.translate(VirtAddr::new(va)).map(|p| p.as_u64()))
+    sched::with_current(|t| {
+        t.addr_space
+            .as_ref()?
+            .translate(VirtAddr::new(va))
+            .map(|p| p.as_u64())
+    })
 }
 
 fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, i64> {
@@ -87,9 +91,11 @@ fn sys_log(ptr: u64, len: u64) -> i64 {
 
 fn sys_send(slot: u64, w0: u64, w1: u64, w2: u64) -> i64 {
     let ep = sched::with_current(|t| {
-        t.caps.lookup(slot as u32, Rights::SEND).map(|c| match &c.object {
-            Object::Endpoint(ep) => ep.clone(),
-        })
+        t.caps
+            .lookup(slot as u32, Rights::SEND)
+            .map(|c| match &c.object {
+                Object::Endpoint(ep) => ep.clone(),
+            })
     });
     let Some(ep) = ep else { return EPERM };
     let msg = Message {
@@ -104,9 +110,11 @@ fn sys_send(slot: u64, w0: u64, w1: u64, w2: u64) -> i64 {
 
 fn sys_recv(slot: u64, buf: u64) -> i64 {
     let ep = sched::with_current(|t| {
-        t.caps.lookup(slot as u32, Rights::RECV).map(|c| match &c.object {
-            Object::Endpoint(ep) => ep.clone(),
-        })
+        t.caps
+            .lookup(slot as u32, Rights::RECV)
+            .map(|c| match &c.object {
+                Object::Endpoint(ep) => ep.clone(),
+            })
     });
     let Some(ep) = ep else { return EPERM };
     if !user_range_ok(buf, 32) {
