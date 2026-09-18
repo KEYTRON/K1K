@@ -3,7 +3,7 @@
 
 use limine::request::{
     BootloaderInfoRequest, ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
-    HhdmRequest, MemmapRequest, RsdpRequest, StackSizeRequest,
+    HhdmRequest, MemmapRequest, MpRequest, RsdpRequest, StackSizeRequest,
 };
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
@@ -53,6 +53,11 @@ pub static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 pub static BOOT_RSDP: RsdpRequest = RsdpRequest::new();
+
+/// Ask the bootloader to park the application processors for us (xAPIC mode).
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static MP: MpRequest = MpRequest::new(0);
 
 pub fn hhdm_offset() -> u64 {
     HHDM.response().expect("limine: no HHDM response").offset

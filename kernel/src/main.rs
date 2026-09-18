@@ -6,7 +6,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
@@ -117,6 +116,7 @@ unsafe extern "C" fn kmain() -> ! {
     klog!("irq", "interrupts on");
     arch::x86_64::pci::init();
     klog!("sys", "syscall/sysret enabled");
+    arch::x86_64::smp::start_aps();
 
     let ep = ipc::Endpoint::new();
     sched::spawn_kernel("kthread-a", kthread_ticker, 300);
@@ -153,6 +153,21 @@ unsafe extern "C" fn kmain() -> ! {
         "--- autotest summary at {} ms ---",
         arch::x86_64::interrupts::uptime_ms()
     );
+    let mut ap_switches = 0u64;
+    for cpu in 0..arch::x86_64::percpu::count() {
+        if let Some(pc) = arch::x86_64::percpu::by_id(cpu) {
+            klog!(
+                "smp",
+                "cpu {} (lapic {}): {} context switches",
+                pc.cpu_id,
+                pc.lapic_id,
+                pc.switches
+            );
+            if cpu > 0 {
+                ap_switches += pc.switches;
+            }
+        }
+    }
     klog!("sched", "{} tasks in table:", sched::task_count());
     sched::dump();
     klog!("superv", "services:");
@@ -170,10 +185,15 @@ unsafe extern "C" fn kmain() -> ! {
         st.free_kib / 1024,
         flaky_restarts
     );
-    if flaky_restarts >= 2 {
+    let smp_ok = arch::x86_64::percpu::count() == 1 || ap_switches > 0;
+    if !smp_ok {
+        klog!("k1k", "FAIL: application processors never ran a task");
+    }
+    if flaky_restarts >= 2 && smp_ok {
         klog!(
             "k1k",
-            "milestone 4 reached: ring 3 + syscalls + capabilities + self-healing supervisor"
+            "autotest passed: ring 3 + capabilities + self-healing supervisor on {} cpu(s)",
+            arch::x86_64::percpu::count()
         );
         arch::x86_64::qemu_exit(0x10);
     } else {

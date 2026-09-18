@@ -2,7 +2,7 @@ MAKEFLAGS += -rR
 .SUFFIXES:
 
 PROFILE   ?= dev
-QEMUFLAGS ?= -m 512M -smp 1
+QEMUFLAGS ?= -m 512M -smp 4
 LIMINE     = third_party/limine
 BUILD      = build
 ISO        = $(BUILD)/k1k.iso

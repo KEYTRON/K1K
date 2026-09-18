@@ -40,15 +40,18 @@ pub unsafe extern "C" fn switch_context(_prev_sp: *mut u64, _next_sp: u64) {
 }
 
 /// First code a fresh task runs, reached via the `ret` in `switch_context`.
-/// r12 = entry fn, r13 = argument. Interrupts are off at this point.
+/// r12 = entry fn, r13 = argument. Interrupts are off at this point; the
+/// previous task is requeued by `finish_switch` before we enable them.
 #[unsafe(naked)]
 pub unsafe extern "C" fn task_trampoline() {
     naked_asm!(
+        "call {finish}",
         "sti",
         "mov rdi, r13",
         "call r12",
         "call {exit}",
         "ud2",
+        finish = sym crate::sched::finish_switch,
         exit = sym crate::sched::thread_exit_hook,
     );
 }
@@ -73,16 +76,14 @@ pub unsafe fn init_stack(stack_top: u64, entry: u64, arg: u64) -> u64 {
     sp
 }
 
-/// Drop to ring 3 at `rip` with stack `rsp`. Never returns.
+/// Drop to ring 3 at `rip` with stack `rsp`. Swaps to the user GS base on the
+/// way out. Never returns.
 #[unsafe(naked)]
 pub unsafe extern "C" fn enter_user(_rip: u64, _rsp: u64, _user_cs: u64, _user_ss: u64) -> ! {
     naked_asm!(
         "mov ax, cx",
         "mov ds, ax",
         "mov es, ax",
-        "xor eax, eax",
-        "mov fs, ax",
-        "mov gs, ax",
         "push rcx",   // ss
         "push rsi",   // rsp
         "push 0x202", // rflags: IF set
@@ -103,6 +104,8 @@ pub unsafe extern "C" fn enter_user(_rip: u64, _rsp: u64, _user_cs: u64, _user_s
         "xor r13d, r13d",
         "xor r14d, r14d",
         "xor r15d, r15d",
+        "cli",
+        "swapgs",
         "iretq",
     );
 }

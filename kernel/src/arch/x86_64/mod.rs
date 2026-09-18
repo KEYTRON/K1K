@@ -5,10 +5,13 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod pci;
+pub mod percpu;
 pub mod pic;
 pub mod pit;
 pub mod serial;
+pub mod smp;
 pub mod syscall;
+pub mod trap;
 
 pub fn halt_loop() -> ! {
     loop {
@@ -27,6 +30,7 @@ pub fn qemu_exit(code: u8) -> ! {
 
 pub fn early_init() {
     serial::init();
-    gdt::init();
+    let tss = gdt::init_bsp();
     idt::init();
+    percpu::init_bsp(0, tss);
 }

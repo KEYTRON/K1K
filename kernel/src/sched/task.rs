@@ -40,6 +40,10 @@ pub struct Task {
     pub ipc_inbox: Option<crate::ipc::Message>,
     /// Which service (if any) this task instantiates — for supervision.
     pub service: Option<usize>,
+    /// CPU whose stack this task is (or was until `finish_switch`) running on.
+    pub on_cpu: Option<u32>,
+    /// A CPU's idle task: never queued, run only when nothing else is ready.
+    pub is_idle: bool,
 }
 
 impl Task {
@@ -66,10 +70,12 @@ impl Task {
             quantum_left: 0,
             ipc_inbox: None,
             service: None,
+            on_cpu: None,
+            is_idle: false,
         })
     }
 
-    /// The boot context: no owned stack, already running.
+    /// A CPU's boot context: no owned stack, already running.
     pub fn boot(id: TaskId) -> Box<Self> {
         Box::new(Self {
             id,
@@ -85,6 +91,8 @@ impl Task {
             quantum_left: 0,
             ipc_inbox: None,
             service: None,
+            on_cpu: None,
+            is_idle: true,
         })
     }
 

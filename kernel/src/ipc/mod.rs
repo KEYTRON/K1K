@@ -87,23 +87,28 @@ impl Endpoint {
     }
 
     /// Receive a message, blocking the current task until one arrives.
+    ///
+    /// Registering as a receiver, marking ourselves blocked and switching away
+    /// happen in one interrupts-off section so a sender on another CPU can
+    /// never slip a message in between and have its wake-up lost.
     pub fn recv(&self) -> Message {
         loop {
-            let queued = interrupts::without_interrupts(|| {
+            let got = interrupts::without_interrupts(|| {
                 let mut inner = self.inner.lock();
                 if let Some(m) = inner.queue.pop_front() {
                     return Some(m);
                 }
                 let me = sched::current_id();
                 inner.receivers.push_back(me);
-                sched::with_current(|t| t.ipc_inbox = None);
-                None
+                sched::with_current(|t| {
+                    t.ipc_inbox = None;
+                });
+                sched::mark_blocked();
+                drop(inner);
+                sched::schedule();
+                sched::with_current(|t| t.ipc_inbox.take())
             });
-            if let Some(m) = queued {
-                return m;
-            }
-            sched::block_current();
-            if let Some(m) = sched::with_current(|t| t.ipc_inbox.take()) {
+            if let Some(m) = got {
                 return m;
             }
         }

@@ -1,16 +1,15 @@
-//! `syscall`/`sysret` fast path. The entry stub swaps to the current task's
-//! kernel stack, saves the user return state, and calls the dispatcher.
+//! `syscall`/`sysret` fast path. The entry stub swaps to the kernel GS base,
+//! moves to the current task's kernel stack, saves the user return state and
+//! calls the dispatcher.
 
 use core::arch::naked_asm;
 use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 
-use super::gdt;
+use super::{gdt, percpu};
 
-#[unsafe(no_mangle)]
-static mut USER_RSP_SCRATCH: u64 = 0;
-
+/// Program the syscall MSRs on the calling CPU.
 pub fn init() {
     let sel = gdt::selectors();
     unsafe {
@@ -28,18 +27,18 @@ pub fn init() {
 }
 
 /// User ABI: rax = number, args rdi, rsi, rdx, r10. Kernel dispatcher ABI:
-/// `dispatch(nr, a0, a1, a2, a3)` in rdi, rsi, rdx, rcx, r8.
+/// `dispatch(nr, a0, a1, a2, a3)` in rdi, rsi, rdx, rcx, r8. Every register
+/// except rax/rcx/r11 is preserved for the caller.
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
     naked_asm!(
-        "mov [rip + {scratch}], rsp",
-        "mov rsp, [rip + {kstack}]",
-        "push qword ptr [rip + {scratch}]",
+        "swapgs",
+        "mov gs:[{user_rsp}], rsp",
+        "mov rsp, gs:[{kstack}]",
+        "push qword ptr gs:[{user_rsp}]",
         "push rcx",
         "push r11",
         "push rax",
-        // Caller-saved registers the dispatcher may clobber; user code sees
-        // every register except rax/rcx/r11 preserved across `syscall`.
         "push rdi",
         "push rsi",
         "push rdx",
@@ -64,9 +63,10 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop r11",
         "pop rcx",
         "pop rsp",
+        "swapgs",
         "sysretq",
-        scratch = sym USER_RSP_SCRATCH,
-        kstack = sym crate::sched::CURRENT_KSTACK_TOP,
+        user_rsp = const percpu::OFF_USER_RSP,
+        kstack = const percpu::OFF_KSTACK_TOP,
         dispatch = sym crate::syscall::dispatch,
     );
 }

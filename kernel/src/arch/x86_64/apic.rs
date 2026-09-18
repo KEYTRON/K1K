@@ -50,14 +50,18 @@ fn mmio(phys: u64, len: u64) -> u64 {
     pmm::phys_to_virt(PhysAddr::new(phys)).as_u64()
 }
 
-/// Enable the BSP's local APIC and calibrate its timer against the PIT.
-pub fn init_lapic() {
-    let phys = acpi::madt().lapic_address;
-    LAPIC_BASE.store(mmio(phys, 0x1000), Ordering::Relaxed);
-
+/// Software-enable the calling CPU's local APIC with the timer masked.
+pub fn enable_local() {
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR as u32);
     lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+}
+
+/// Map the BSP's local APIC and calibrate its timer against the PIT.
+pub fn init_lapic() {
+    let phys = acpi::madt().lapic_address;
+    LAPIC_BASE.store(mmio(phys, 0x1000), Ordering::Relaxed);
+    enable_local();
 
     lapic_write(LAPIC_TIMER_DIV, DIV_16);
     lapic_write(LAPIC_TIMER_INIT, u32::MAX);

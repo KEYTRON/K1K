@@ -1,8 +1,10 @@
-//! Preemptive round-robin scheduler with kernel threads and user tasks.
+//! Preemptive round-robin scheduler for many CPUs.
 //!
-//! Every task owns a kernel stack; switching is done on kernel stacks only
-//! (`context::switch_context`). Ring-3 tasks additionally own an address
-//! space and are entered via `iretq` from their kernel thread.
+//! One global run queue guarded by `SCHED`; each CPU has its own idle task
+//! and `current` in its per-CPU block. A task that is being switched away
+//! from is *not* requeued until the CPU has actually left its stack
+//! (`finish_switch`), and `wake` never enqueues a task that is still on a
+//! CPU — together these keep another core from resuming a half-saved context.
 
 pub mod task;
 
@@ -15,14 +17,14 @@ use x86_64::VirtAddr;
 use x86_64::instructions::interrupts;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 
-use crate::arch::x86_64::{context, gdt, interrupts as irq};
+use crate::arch::x86_64::{context, gdt, interrupts as irq, percpu};
 use crate::klog;
 use task::{State, Task, TaskId};
 
 pub use task::UserEntry;
 
 const QUANTUM_TICKS: u32 = 10;
-pub const IDLE_ID: TaskId = 0;
+pub const NO_TASK: TaskId = percpu::NO_TASK;
 
 pub struct Scheduler {
     tasks: BTreeMap<TaskId, Box<Task>>,
@@ -35,30 +37,39 @@ pub static SCHED: Mutex<Scheduler> = Mutex::new(Scheduler {
     tasks: BTreeMap::new(),
     ready: VecDeque::new(),
     reap: VecDeque::new(),
-    next_id: 1,
+    next_id: 0,
 });
 
-static CURRENT: AtomicU32 = AtomicU32::new(IDLE_ID);
-
-/// Top of the running task's kernel stack; read by the syscall entry stub.
-#[unsafe(no_mangle)]
-pub static mut CURRENT_KSTACK_TOP: u64 = 0;
-
 /// Task that reaps dead tasks and restarts supervised services.
-static SUPERVISOR: AtomicU32 = AtomicU32::new(0);
+static SUPERVISOR: AtomicU32 = AtomicU32::new(NO_TASK);
 
 pub fn current_id() -> TaskId {
-    CURRENT.load(Ordering::Relaxed)
+    percpu::get().current
+}
+
+/// Turn the calling CPU's boot context into its idle task.
+pub fn register_idle_cpu() -> TaskId {
+    interrupts::without_interrupts(|| {
+        let mut s = SCHED.lock();
+        let id = s.next_id;
+        s.next_id += 1;
+        let mut t = Task::boot(id);
+        t.on_cpu = Some(percpu::cpu_id());
+        s.tasks.insert(id, t);
+        let pc = percpu::get();
+        pc.current = id;
+        pc.idle_task = id;
+        id
+    })
 }
 
 pub fn init() {
-    let mut s = SCHED.lock();
-    s.tasks.insert(IDLE_ID, Task::boot(IDLE_ID));
+    let id = register_idle_cpu();
     klog!(
         "sched",
-        "initialised (quantum {} ticks @ {} Hz)",
-        QUANTUM_TICKS,
-        irq::TIMER_HZ
+        "initialised on cpu 0 (idle task {}, quantum {} ms)",
+        id,
+        QUANTUM_TICKS * 1000 / irq::TIMER_HZ
     );
 }
 
@@ -100,53 +111,54 @@ pub fn with_current<R>(f: impl FnOnce(&mut Task) -> R) -> R {
     with_task(current_id(), f).expect("current task vanished")
 }
 
+fn pick_next(s: &mut Scheduler) -> Option<TaskId> {
+    while let Some(id) = s.ready.pop_front() {
+        if let Some(t) = s.tasks.get(&id)
+            && t.state == State::Ready
+            && t.on_cpu.is_none()
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Pick the next task and switch to it. Must be called with interrupts disabled.
 pub fn schedule() {
-    let cur_id = current_id();
+    let pc = percpu::get();
+    let cpu = pc.cpu_id;
+    let cur_id = pc.current;
+
     let (prev_sp_ptr, next_sp) = {
         let mut s = SCHED.lock();
 
-        let next_id = loop {
-            match s.ready.pop_front() {
-                Some(id) => {
-                    if matches!(s.tasks.get(&id).map(|t| t.state), Some(State::Ready)) {
-                        break id;
-                    }
-                }
-                None => {
-                    let cur_state = s.tasks.get(&cur_id).map(|t| t.state);
-                    break if cur_state == Some(State::Running) {
-                        cur_id
-                    } else {
-                        IDLE_ID
-                    };
-                }
+        let next_id = match pick_next(&mut s) {
+            Some(id) => id,
+            None => {
+                let cur_running = s.tasks.get(&cur_id).map(|t| t.state) == Some(State::Running);
+                if cur_running { cur_id } else { pc.idle_task }
             }
         };
 
         if next_id == cur_id {
-            let t = s.tasks.get_mut(&cur_id).unwrap();
-            t.quantum_left = QUANTUM_TICKS;
+            if let Some(t) = s.tasks.get_mut(&cur_id) {
+                t.quantum_left = QUANTUM_TICKS;
+                if t.state == State::Ready {
+                    t.state = State::Running;
+                }
+            }
             return;
         }
 
-        if let Some(cur) = s.tasks.get_mut(&cur_id)
-            && cur.state == State::Running
-        {
+        let cur = s.tasks.get_mut(&cur_id).expect("current task vanished");
+        if cur.state == State::Running {
             cur.state = State::Ready;
-            if cur_id != IDLE_ID {
-                s.ready.push_back(cur_id);
-            }
         }
+        let prev_sp_ptr = addr_of_mut!(cur.ctx_sp);
 
-        let prev_sp_ptr = s
-            .tasks
-            .get_mut(&cur_id)
-            .map(|t| addr_of_mut!(t.ctx_sp))
-            .unwrap_or(core::ptr::null_mut());
-
-        let next = s.tasks.get_mut(&next_id).unwrap();
+        let next = s.tasks.get_mut(&next_id).expect("next task vanished");
         next.state = State::Running;
+        next.on_cpu = Some(cpu);
         next.quantum_left = QUANTUM_TICKS;
         let next_sp = next.ctx_sp;
         let kstack_top = next.kstack_top();
@@ -156,10 +168,12 @@ pub fn schedule() {
             .map(|a| a.cr3())
             .unwrap_or_else(crate::mm::vmm::kernel_pml4);
 
-        CURRENT.store(next_id, Ordering::Relaxed);
+        pc.current = next_id;
+        pc.prev_pending = cur_id;
+        pc.switches += 1;
         if kstack_top != 0 {
             gdt::set_kernel_stack(VirtAddr::new(kstack_top));
-            unsafe { *addr_of_mut!(CURRENT_KSTACK_TOP) = kstack_top };
+            pc.kstack_top = kstack_top;
         }
         if Cr3::read().0 != cr3 {
             unsafe { Cr3::write(cr3, Cr3Flags::empty()) };
@@ -167,13 +181,26 @@ pub fn schedule() {
         (prev_sp_ptr, next_sp)
     };
 
-    let mut scratch = 0u64;
-    let prev = if prev_sp_ptr.is_null() {
-        &mut scratch as *mut u64
-    } else {
-        prev_sp_ptr
-    };
-    unsafe { context::switch_context(prev, next_sp) };
+    unsafe { context::switch_context(prev_sp_ptr, next_sp) };
+    finish_switch();
+}
+
+/// Runs on the new context right after a switch: the previous task has left
+/// its stack, so it may now be picked up by any CPU.
+pub extern "C" fn finish_switch() {
+    let pc = percpu::get();
+    let prev = pc.prev_pending;
+    pc.prev_pending = NO_TASK;
+    if prev == NO_TASK {
+        return;
+    }
+    let mut s = SCHED.lock();
+    if let Some(t) = s.tasks.get_mut(&prev) {
+        t.on_cpu = None;
+        if t.state == State::Ready && !t.is_idle {
+            s.ready.push_back(prev);
+        }
+    }
 }
 
 pub fn yield_now() {
@@ -191,12 +218,10 @@ pub fn sleep_ms(ms: u64) {
     });
 }
 
-/// Block the current task until `wake` is called on it.
-pub fn block_current() {
-    interrupts::without_interrupts(|| {
-        with_current(|t| t.state = State::Blocked);
-        schedule();
-    });
+/// Mark the current task blocked. Interrupts must already be disabled; the
+/// caller follows up with `schedule()` after releasing its own locks.
+pub fn mark_blocked() {
+    with_current(|t| t.state = State::Blocked);
 }
 
 pub fn wake(id: TaskId) {
@@ -206,7 +231,9 @@ pub fn wake(id: TaskId) {
             && matches!(t.state, State::Blocked | State::Sleeping)
         {
             t.state = State::Ready;
-            s.ready.push_back(id);
+            if t.on_cpu.is_none() {
+                s.ready.push_back(id);
+            }
         }
     });
 }
@@ -223,7 +250,7 @@ pub fn exit_current(code: i64) -> ! {
         s.reap.push_back(id);
     }
     let sup = SUPERVISOR.load(Ordering::Relaxed);
-    if sup != 0 {
+    if sup != NO_TASK {
         wake(sup);
     }
     schedule();
@@ -234,32 +261,38 @@ pub extern "C" fn thread_exit_hook() -> ! {
     exit_current(0)
 }
 
-/// Pop one dead task for the supervisor to inspect and free.
+/// Pop one dead task that has fully left its CPU, for the supervisor to free.
 pub fn take_dead() -> Option<Box<Task>> {
     interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
-        let id = s.reap.pop_front()?;
+        let pos = s
+            .reap
+            .iter()
+            .position(|id| s.tasks.get(id).is_some_and(|t| t.on_cpu.is_none()))?;
+        let id = s.reap.remove(pos)?;
         s.tasks.remove(&id)
     })
 }
 
 pub fn on_tick() {
     let now = irq::ticks();
+    let cur = current_id();
     let mut s = SCHED.lock();
     let mut woke = alloc::vec::Vec::new();
     for (id, t) in s.tasks.iter_mut() {
         if t.state == State::Sleeping && t.sleep_until <= now {
             t.state = State::Ready;
-            woke.push(*id);
+            if t.on_cpu.is_none() {
+                woke.push(*id);
+            }
         }
     }
     s.ready.extend(woke);
 
-    let cur = current_id();
     let preempt = match s.tasks.get_mut(&cur) {
         Some(t) => {
             t.quantum_left = t.quantum_left.saturating_sub(1);
-            t.quantum_left == 0 || cur == IDLE_ID
+            t.quantum_left == 0 || t.is_idle
         }
         None => true,
     };
@@ -278,12 +311,13 @@ pub fn on_user_fault(what: &str, code: u64, rip: u64) -> ! {
     let (id, name) = with_current(|t| (t.id, t.name));
     klog!(
         "fault",
-        "task {} '{}' {} code={:#x} rip={:#x} -> killed",
+        "task {} '{}' {} code={:#x} rip={:#x} cpu={} -> killed",
         id,
         name,
         what,
         code,
-        rip
+        rip,
+        percpu::cpu_id()
     );
     exit_current(-1)
 }
@@ -292,12 +326,13 @@ pub fn on_user_page_fault(addr: u64, code: u64, rip: u64) -> ! {
     let (id, name) = with_current(|t| (t.id, t.name));
     klog!(
         "fault",
-        "task {} '{}' #PF addr={:#x} code={:#x} rip={:#x} -> killed",
+        "task {} '{}' #PF addr={:#x} code={:#x} rip={:#x} cpu={} -> killed",
         id,
         name,
         addr,
         code,
-        rip
+        rip,
+        percpu::cpu_id()
     );
     exit_current(-1)
 }
@@ -312,11 +347,15 @@ pub fn dump() {
         for (id, t) in s.tasks.iter() {
             klog!(
                 "sched",
-                "  #{:<3} {:<12} {:?}{}",
+                "  #{:<3} {:<12} {:?}{}{}",
                 id,
                 t.name,
                 t.state,
-                if t.is_user() { " (ring3)" } else { "" }
+                if t.is_user() { " (ring3)" } else { "" },
+                match t.on_cpu {
+                    Some(c) => alloc::format!(" on cpu {}", c),
+                    None => alloc::string::String::new(),
+                }
             );
         }
     });

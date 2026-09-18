@@ -18,6 +18,15 @@ The kernel core owns scheduling, address spaces, IPC and capabilities.
 Everything else — drivers, file systems, network, GUI — is meant to run as
 isolated, restartable services.
 
+## K1K and K1OS
+
+K1K is the kernel of [K1OS](https://github.com/KEYTRON/K1OS) — the "1" is the
+OS generation, not a version 0.x placeholder, hence `1.0.0-alpha` here. K1OS
+today boots a Linux kernel with its own package manager,
+[WARP](https://github.com/KEYTRON/WARP); the plan is to migrate K1OS onto K1K
+step by step (boot → services → WARP-delivered user space) as the kernel grows
+the drivers and the VFS it needs.
+
 ## What works today
 
 - Boots via the [Limine](https://github.com/limine-bootloader/limine) protocol
@@ -30,6 +39,9 @@ isolated, restartable services.
   PIT, I/O APIC routing with MADT interrupt overrides; legacy PICs disabled.
 - Preemptive round-robin scheduler (LAPIC timer @ 1 kHz, 10 ms quantum),
   kernel threads, sleep/block/wake.
+- SMP: application processors are brought up through the Limine MP protocol,
+  each with its own GDT/TSS, per-CPU block (GS base, `swapgs` on every
+  kernel entry/exit) and idle task; one shared run queue, tasks migrate freely.
 - Capability tables (`object + rights`, slot-indexed) and synchronous message
   endpoints with direct hand-off to a blocked receiver. A message can carry a
   capability (rights ∩ mask, `GRANT` required) — the only way authority moves
@@ -102,7 +114,7 @@ limine.conf       bootloader configuration
 
 ## Roadmap (short)
 
-- SMP bring-up (Limine MP), per-CPU state, HPET/TSC clock.
+- HPET/TSC clock, inter-processor interrupts (TLB shootdown, remote reschedule).
 - Asynchronous notifications; IRQ and PCI-device capabilities so ring-3
   drivers can own hardware; AHCI/virtio drivers and a VFS server.
 - Capability revocation; an allocator for `k1k-rt`.

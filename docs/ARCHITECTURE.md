@@ -41,8 +41,14 @@ calibrates its timer against PIT channel 2 (20 ms one-shot, gate on port
 redirection entry is masked first; `route_isa_irq` then programs the entry for
 a legacy IRQ, applying polarity/trigger from a MADT override if present. The
 legacy 8259 PICs are remapped away from the exception vectors and fully
-masked. Vectors 32..254 that nothing claimed land in `unexpected_irq`, which
-just acknowledges them.
+masked.
+
+Every IDT vector points at a generated asm stub (`trap_stubs.s`) that pushes
+`(error code, vector)`, saves all general-purpose registers, does `swapgs` if
+the trap came from ring 3, and calls `trap_dispatch(&mut TrapFrame)`
+(`trap.rs`). The dispatcher routes exceptions (kill the user task or panic),
+the timer and keyboard vectors, and acknowledges anything else. On the way
+out the stub swaps GS back for ring-3 frames and `iretq`s.
 
 ## Memory
 
@@ -82,8 +88,35 @@ Task states: `Ready`, `Running`, `Blocked` (waiting on an endpoint),
 
 Ring 3 is entered from the task's kernel thread with `iretq`
 (`context::enter_user`). On a syscall the CPU switches to the current task's
-kernel stack (`CURRENT_KSTACK_TOP`, also mirrored into `TSS.rsp0` for
-interrupts), so nested traps and preemption inside syscalls just work.
+kernel stack (`PerCpu.kstack_top`, also mirrored into this CPU's `TSS.rsp0`
+for interrupts), so nested traps and preemption inside syscalls just work.
+
+## SMP and per-CPU state
+
+The bootstrap processor discovers the others through the Limine MP response
+and releases them one at a time (`smp.rs`). Before an AP starts, the BSP
+allocates its `CpuTables` (GDT, TSS, IST stack) and `PerCpu` block; the AP
+loads them, installs the shared IDT, programs its syscall MSRs, registers its
+boot context as its idle task, starts its local APIC timer and enables
+interrupts. From then on it is just another CPU pulling work from the run
+queue.
+
+`PerCpu` (`percpu.rs`) is reached through the GS base: in kernel mode
+`GS_BASE` points at the block, while a task runs in ring 3 the bases are
+swapped (`swapgs` in the syscall stub, the trap stubs and `enter_user`), so
+user code cannot see or clobber the kernel pointer. `CR4.FSGSBASE` is kept
+clear. The block holds the current task, the idle task, the kernel stack top
+for syscall entry, the TSS pointer and a context-switch counter.
+
+Cross-CPU correctness rests on two rules in `sched/mod.rs`: a task being
+switched away from is requeued only by `finish_switch`, which runs on the new
+context after the old stack is no longer in use; and `wake` marks a task
+`Ready` but does not enqueue it while `on_cpu` is set — `finish_switch`
+enqueues it then. The supervisor likewise reaps a dead task only once it has
+left its CPU. `Endpoint::recv` registers, marks itself blocked and switches
+away inside a single interrupts-off section, so a sender on another CPU cannot
+lose the wake-up. Wall time advances only on the BSP's timer tick; every CPU's
+tick drives its own preemption.
 
 ## Objects, capabilities, IPC
 
