@@ -46,3 +46,11 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [ ] Service binaries delivered to `/SVC` as WARP packages
 - [ ] A terminal and shell on top of K1K
 - [ ] Networking
+
+## Other architectures
+K1K runs only on x86_64 today: all platform code (GDT/IDT, APIC, ACPI) is written for it.
+- [ ] An `arch/` layer separated from the common kernel code
+- [ ] aarch64 in QEMU (`virt`): GIC interrupt controller, ARM timer, boot through Limine over UEFI
+- [ ] CI on aarch64
+- [ ] Apple Silicon: the AIC interrupt controller, boot through m1n1 and U-Boot
+- [ ] RISC-V (riscv64) — once there is real hardware to test on
