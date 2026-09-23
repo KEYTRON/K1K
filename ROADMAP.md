@@ -46,6 +46,7 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [ ] Service binaries delivered to `/SVC` as WARP packages
 - [ ] A terminal and shell on top of K1K
 - [ ] Networking
+- [ ] NVIDIA GPU driver as a ring-3 service on top of the GSP firmware (after the nova driver in Linux), delivered by WARP
 
 ## Other architectures
 K1K runs only on x86_64 today: all platform code (GDT/IDT, APIC, ACPI) is written for it.
