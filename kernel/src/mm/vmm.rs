@@ -22,6 +22,41 @@ pub const KERNEL_HEAP_START: u64 = 0xffff_9000_0000_0000;
 /// Top of the canonical lower half; user stacks grow down from here.
 pub const USER_STACK_TOP: u64 = 0x0000_7fff_ffff_0000;
 
+/// One page holding the [`BootInfo`] the supervisor writes before a ring-3
+/// task starts. It sits below the stack with a gap, so a service overflow
+/// cannot reach it.
+pub const USER_INFO_BASE: u64 = USER_STACK_TOP - 0x0000_0000_0002_0000;
+/// Per-service heap. The supervisor maps this range in every ring-3 task and
+/// `k1k-rt` turns it into its global allocator, so services can use `Box`,
+/// `Vec`, `String` and `format!`.
+pub const USER_HEAP_BASE: u64 = 0x0000_7000_0000_0000;
+pub const USER_HEAP_PAGES: usize = 1024; // 4 MiB
+
+/// "K1KBOOT1" — identifies a filled [`USER_INFO_BASE`] page.
+pub const BOOT_INFO_MAGIC: u64 = 0x3148_4F4F_425A_314B;
+/// Bumped whenever the layout below changes; `k1k-rt` refuses a mismatch.
+pub const BOOT_INFO_LAYOUT: u64 = 1;
+
+/// The first bytes a ring-3 task sees, written by the supervisor at
+/// [`USER_INFO_BASE`]: where its heap and stack are, and the launch arguments
+/// the spawning service attached to the `spawn` call. `user/rt` mirrors this
+/// layout — keep the two in step.
+#[repr(C)]
+pub struct BootInfo {
+    pub magic: u64,
+    pub layout: u64,
+    pub task_id: u32,
+    pub _pad: u32,
+    pub heap_base: u64,
+    pub heap_size: u64,
+    pub stack_top: u64,
+    pub arg_len: u64,
+    // `arg_len` bytes of arguments follow, NUL-terminated.
+}
+
+/// Largest argument blob [`BootInfo`] can carry (one page, minus the header).
+pub const MAX_BOOT_ARGS: usize = 1024;
+
 static KERNEL_PML4: Mutex<Option<PhysFrame>> = Mutex::new(None);
 
 pub fn kernel_pml4() -> PhysFrame {

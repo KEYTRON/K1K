@@ -30,6 +30,9 @@ jobs:
       - name: Build kernel and services
         run: make kernel
 
+      - name: Service allocator on the host
+        run: make test-heap
+
       - name: Boot test in QEMU (4 CPUs, NVMe disk)
         run: make test
 

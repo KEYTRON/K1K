@@ -177,6 +177,14 @@ Level-triggered lines are masked at the I/O APIC until the driver calls
 `SPAWN` lets a task turn an ELF image held in a memory object into a new
 supervised service (`spawn`). Only `fs` holds one.
 
+Two halves of a channel are two objects. `Endpoint::new_pair` returns a
+connected pair: `send` on one half delivers into the other half's queue, and
+each half is a capability of its own. This is what makes "let a client talk to
+the file service" expressible — `fs` holds the receiving half, the manifest can
+hand the sending half to a service, and no right ever has to grow: intersecting
+`RECV` with a `SEND` mask would otherwise yield an empty right and a client
+that cannot send.
+
 ## Drivers and user space in ring 3
 
 The kernel contains no device protocol and no file system:
@@ -197,15 +205,61 @@ The kernel contains no device protocol and no file system:
   count`; `blk` answers `status, blocks, block_size` after DMA-ing into the
   buffer. The protocol constants live in `k1k-rt::blkproto`.
 - `fs`: read-only FAT12/16/32 (`user/svc/fs/src/fat.rs`) over that protocol
-  with a 64 KiB shared DMA buffer. It is also init: it lists `/SVC`, reads
-  each ELF into a memory object and calls `spawn`, which registers a dynamic
-  service (image retained in kernel memory so the supervisor can restart it)
-  and starts it.
+  with a 64 KiB shared DMA buffer. It is also init: it reads
+  `/SVC/MANIFEST.TXT` and starts exactly what the manifest lists.
 
 Boot therefore looks like: Limine → kernel → embedded `kbd`/`blk`/`fs`
 (and the `ping`/`pong` demo) → `fs` mounts the disk → the rest of user space
-comes from `/SVC`. If a driver crashes, the supervisor restarts it and it
+comes from the manifest. If a driver crashes, the supervisor restarts it and it
 re-initialises its hardware.
+
+### The service manifest
+
+`/SVC/MANIFEST.TXT` is the list of what runs, one service per line:
+
+```text
+# name   image          capabilities
+hello    HELLO.ELF      fs
+flaky    FLAKY.EOF
+console  CONSOLE.ELF    fs,control
+```
+
+`#` starts a comment, a bad line is reported and skipped rather than stopping
+the boot, and a service is started only if it is listed — a file dropped into
+`/SVC` stays inert. Image names are paths on the volume; a relative name
+resolves under `/SVC`.
+
+Capability names are resolved by `fs` against capabilities it holds itself
+(`fs` = the calling half of the file channel, `control` = the spawn authority),
+so a manifest can only hand out authority that already exists in the system, and
+a typo is an error rather than a silent absence of access. Each granted
+capability becomes a slot in the new task numbered in manifest order; the
+supervisor passes the mapping to the service in the `caps=` launch argument and
+`k1k_rt::granted("fs")` looks it up, so a service never hard-codes a slot
+number.
+
+### The file protocol
+
+A client holding the `fs` capability talks to `fs` over the shared buffer it
+registers; paths, listings and file contents are bytes in that buffer, so no
+service has to trust a pointer and the kernel stays out of the file business.
+The wire form is one message each way:
+
+```text
+client → fs   w0 = opcode, w1 = bytes written in the request block, w2 = result bytes wanted
+fs → client   w0 = status, w1 = arg0, w2 = arg1
+```
+
+`k1k-rt` provides both ends: `file::FileClient` (`open`, `read`, `read_all`,
+`stat`, `list`, `close`) and `server::Server`, which tracks clients by task and
+replies only on the endpoint a client registered. The server's two handshakes —
+`CONNECT` (reply endpoint) and `REGISTER_BUF` (shared buffer) — are
+independent, so a client may send them in either order.
+
+A third service that wants files therefore needs nothing but its manifest
+line: `hello` lists `/SVC`, stats and reads `/README.TXT`, and survives every
+failure it can hit (missing capability, no file service, a path that is not
+there).
 
 The keyboard IRQ is the first "driver as a message source": the handler pushes
 scancodes into a kernel-owned endpoint; the `kbd` service holds the only
@@ -214,15 +268,61 @@ decoding never runs in ring 0, and if `kbd` crashes the supervisor restarts it.
 
 ## Services and supervision
 
-`service/mod.rs` keeps a table of `ServiceSpec { name, image, grants }`.
-`spawn` builds an `AddressSpace`, loads the ELF image (`loader/mod.rs`:
-static ELF64, each `PT_LOAD` mapped with permissions derived from `p_flags`,
-addresses validated against the user range), maps a 64 KiB stack, creates the
-task and inserts the granted capabilities. Services are built from the
-`user/` Cargo workspace by `kernel/build.rs` and embedded with `include_bytes!`. `supervisor_main` runs as a
-kernel thread: it reaps `Dead` tasks (freeing stack, address space,
+`service/mod.rs` keeps a table of
+`ServiceSpec { name, image, grants, dynamic, args }`. `spawn(idx)` builds an
+`AddressSpace`, loads the ELF image (`loader/mod.rs`: static ELF64, each
+`PT_LOAD` mapped with permissions derived from `p_flags`, addresses validated
+against the user range), maps a 64 KiB stack, a 4 MiB heap
+(`USER_HEAP_BASE`) and one boot-info page, inserts the granted capabilities and
+publishes the task.
+
+The task id is reserved before any of that (`sched::reserve_task_id`), so the
+boot-info page can carry the final id and be in place before any CPU can enter
+the task — a service must never observe a half-built address space. The page
+holds the heap and stack bounds and the launch arguments; `k1k-rt` reads it to
+find its heap and its arguments, and its allocator initialises itself from it on
+first use, with no setup call in user code.
+
+`services`, the image and the arguments are kept for the lifetime of the kernel,
+so a restart re-creates the task with exactly the authority it was given the
+first time. Services are built from the `user/` Cargo workspace by
+`kernel/build.rs` and embedded with `include_bytes!`. `supervisor_main` runs as
+a kernel thread: it reaps `Dead` tasks (freeing stack, address space,
 capabilities) and, for tasks that belonged to a service, re-spawns them. After
 three restarts a linear backoff (200 ms × n, capped at 3 s) is applied.
+
+`spawn_desc` (syscall 22) is `spawn` plus a list of capabilities and an
+argument blob. The descriptor lives in the caller's address space:
+
+```text
+word 0  ctl_slot   1  mem_slot    2  size       3  name_ptr
+word 4  name_len   5  n_grants    6  arg_ptr    7  arg_len
+then n_grants × { slot, rights }
+```
+
+Each grant is derived from the caller's own table — `GRANT` required, rights
+intersected — so authority is never widened, only handed on. The new task's
+capability slots are numbered in the order given, which is what the `caps=`
+argument reports.
+
+### The service heap
+
+`k1k-rt` provides the global allocator for every ring-3 program: first fit over
+a free list kept in address order, doubly linked so `dealloc` merges with both
+neighbours in constant time, and a `realloc` that grows or shrinks in place
+whenever the neighbouring block allows. Two details matter more than they look:
+
+- Block sizes are rounded up to 16 bytes so the "free" flag can live in bit 0
+  of the size word; a size that was not a multiple of two would make the flag
+  and the size indistinguishable.
+- A payload with an alignment above 16 cannot start immediately after the
+  header, so `payload - header` is not the header. Each payload therefore keeps
+  the distance back to its header in the word below itself, which is what lets
+  `dealloc` find the block again.
+
+`make test-heap` runs the allocator on the host against a stub boot-info page
+and audits the block list — sizes, links, tiling, overlap, and the accounting —
+after every single operation of a 50,000-round churn. It is part of CI.
 
 Faults in ring 3 (`#PF`, `#GP`, `#UD`, …) are routed by the IDT handlers to
 `sched::on_user_fault`, which marks the task dead and schedules away. The same
@@ -259,6 +359,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 19 | `dev_irq` | `dev_slot` | new irq slot (`RECV|GRANT`), `EPERM`, `EINVAL` |
 | 20 | `port_in` | `port_slot, offset, width` | value, `EPERM`, `EINVAL` |
 | 21 | `port_out` | `port_slot, offset, width, value` | 0, `EPERM`, `EINVAL` |
+| 22 | `spawn_desc` | `ptr` to the descriptor above (≤ 8 grants, ≤ 1024 argument bytes) | new task id, `EPERM`, `EINVAL`, `EFAULT` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.
@@ -269,6 +370,13 @@ task's own page tables before the kernel touches them.
 ## Testing
 
 `make test` builds an ISO whose `limine.conf` passes `cmdline: autotest`. The
-kernel runs the demo services for six seconds, prints a summary and exits QEMU
-through `isa-debug-exit` with status 33 on success (`flaky` restarted at least
-twice) or 35 on failure. The serial log lands in `build/serial.log`.
+kernel runs the services for eight seconds (`autotest=<seconds>` changes that),
+prints a summary and exits QEMU through `isa-debug-exit` with status 33 on
+success or 35 on failure. The log must show `fs` mounting the volume, starting
+both services from the manifest, serving files, and `hello` reading
+`/README.TXT` through the protocol — a boot that starts services but cannot
+serve a file is a failure, not a pass. The serial log lands in
+`build/serial.log`.
+
+`make test-heap` is the allocator test described above; CI runs both, on BIOS
+and through the K1OS boot test on UEFI.

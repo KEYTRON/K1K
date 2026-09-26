@@ -24,30 +24,6 @@ impl DirEntry {
     pub fn is_dir(&self) -> bool {
         self.attr & 0x10 != 0
     }
-
-    /// "NAME    EXT" → "NAME.EXT" (upper case, as stored).
-    pub fn display<'a>(&self, out: &'a mut [u8; 13]) -> &'a str {
-        let mut n = 0;
-        for &b in &self.name[..8] {
-            if b == b' ' {
-                break;
-            }
-            out[n] = b;
-            n += 1;
-        }
-        if self.name[8] != b' ' {
-            out[n] = b'.';
-            n += 1;
-            for &b in &self.name[8..] {
-                if b == b' ' {
-                    break;
-                }
-                out[n] = b;
-                n += 1;
-            }
-        }
-        core::str::from_utf8(&out[..n]).unwrap_or("?")
-    }
 }
 
 pub struct Fat {
@@ -277,7 +253,51 @@ impl Fat {
         Ok(copied)
     }
 
-    /// Find an entry by 8.3 name (case-insensitive, "NAME.EXT" form) in a directory.
+    /// Copy part of a file: `out.len()` bytes starting at `offset`, read
+    /// through `scratch` (which must hold at least one cluster). Returns how
+    /// many bytes were produced — fewer than asked for at end of file.
+    pub fn read_at(
+        &mut self,
+        dev: &mut dyn BlockDevice,
+        entry: &DirEntry,
+        offset: u64,
+        scratch: &mut [u8],
+        out: &mut [u8],
+    ) -> Result<usize, ()> {
+        let size = entry.size as usize;
+        let start = offset as usize;
+        if start >= size || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(size - start);
+        let cb = self.cluster_bytes();
+        if scratch.len() < cb {
+            return Err(());
+        }
+        // Walk to the cluster holding `offset`.
+        let mut pos = start;
+        let mut cluster = entry.cluster;
+        while pos >= cb {
+            pos -= cb;
+            cluster = self.next_cluster(dev, cluster)?.ok_or(())?;
+        }
+        let mut done = 0usize;
+        while done < want {
+            self.read_cluster(dev, cluster, &mut scratch[..cb])?;
+            let n = (want - done).min(cb - pos);
+            out[done..done + n].copy_from_slice(&scratch[pos..pos + n]);
+            done += n;
+            pos = 0;
+            if done < want {
+                cluster = self.next_cluster(dev, cluster)?.ok_or(())?;
+            }
+        }
+        Ok(done)
+    }
+
+    /// Find an entry by 8.3 name (case-insensitive, "NAME.EXT" form) in a
+    /// directory. A name that does not fit 8.3 never matches rather than
+    /// matching a truncated one.
     pub fn lookup(
         &mut self,
         dev: &mut dyn BlockDevice,
@@ -285,7 +305,9 @@ impl Fat {
         name: &str,
         buf: &mut [u8],
     ) -> Result<Option<DirEntry>, ()> {
-        let want = to_83(name);
+        let Some(want) = to_83(name) else {
+            return Ok(None);
+        };
         let mut found = None;
         self.read_dir(dev, dir_cluster, buf, |e| {
             if found.is_none() && e.name == want {
@@ -296,19 +318,35 @@ impl Fat {
     }
 }
 
-fn to_83(name: &str) -> [u8; 11] {
-    let mut out = [b' '; 11];
+/// Convert "name.ext" to its 11-byte 8.3 form, or `None` when it does not fit
+/// or holds a byte FAT cannot store. Truncating instead would silently open a
+/// different file than the caller asked for.
+pub fn to_83(name: &str) -> Option<[u8; 11]> {
     let (base, ext) = match name.find('.') {
         Some(i) => (&name[..i], &name[i + 1..]),
         None => (name, ""),
     };
-    for (i, b) in base.bytes().take(8).enumerate() {
+    if base.is_empty() || base.len() > 8 || ext.len() > 3 {
+        return None;
+    }
+    let mut out = [b' '; 11];
+    for (i, b) in base.bytes().enumerate() {
+        if !valid_name_byte(b) {
+            return None;
+        }
         out[i] = b.to_ascii_uppercase();
     }
-    for (i, b) in ext.bytes().take(3).enumerate() {
+    for (i, b) in ext.bytes().enumerate() {
+        if !valid_name_byte(b) {
+            return None;
+        }
         out[8 + i] = b.to_ascii_uppercase();
     }
-    out
+    Some(out)
+}
+
+fn valid_name_byte(b: u8) -> bool {
+    b.is_ascii_graphic() && b != b'.' && b != b' '
 }
 
 /// Returns false when the end-of-directory marker was reached.

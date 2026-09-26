@@ -85,17 +85,27 @@ pub fn spawn_kernel(name: &'static str, entry: extern "C" fn(u64), arg: u64) -> 
     })
 }
 
-/// Insert an already-built task (used for user tasks) and make it runnable.
-pub fn add_task(mut t: Box<Task>) -> TaskId {
+/// Take the next task id without publishing a task. A ring-3 service reserves
+/// its id first so it can finish the address space (boot info page) before the
+/// task becomes reachable by any CPU.
+pub fn reserve_task_id() -> TaskId {
     interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
         let id = s.next_id;
         s.next_id += 1;
+        id
+    })
+}
+
+/// Publish a task whose id came from [`reserve_task_id`]: insert it and make
+/// it runnable.
+pub fn publish_task(mut t: Box<Task>, id: TaskId) {
+    interrupts::without_interrupts(|| {
+        let mut s = SCHED.lock();
         t.id = id;
         t.state = State::Ready;
         s.tasks.insert(id, t);
         s.ready.push_back(id);
-        id
     })
 }
 

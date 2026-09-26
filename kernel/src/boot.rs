@@ -70,3 +70,16 @@ pub fn cmdline() -> &'static str {
 pub fn cmdline_has(flag: &str) -> bool {
     cmdline().split_whitespace().any(|f| f == flag)
 }
+
+/// The value of `key=value` on the kernel command line.
+pub fn cmdline_value(key: &str) -> Option<&'static str> {
+    let prefix = alloc::format!("{key}=");
+    cmdline()
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix(prefix.as_str()))
+}
+
+/// `key=value` as a number, if it is one.
+pub fn cmdline_u64(key: &str) -> Option<u64> {
+    cmdline_value(key).and_then(|v| v.parse().ok())
+}

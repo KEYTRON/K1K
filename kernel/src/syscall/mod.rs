@@ -8,6 +8,7 @@ use crate::arch::x86_64::interrupts as irq;
 use crate::ipc::{Endpoint, IpcError, Message};
 use crate::mm::pmm::{FRAME_SIZE, phys_to_virt};
 use crate::obj::{Capability, MemoryObject, Object, Rights};
+use crate::service::Grant;
 use crate::{klog, sched};
 
 pub const SYS_LOG: u64 = 0;
@@ -32,6 +33,7 @@ pub const SYS_IRQ_ACK: u64 = 18;
 pub const SYS_DEV_IRQ: u64 = 19;
 pub const SYS_PORT_IN: u64 = 20;
 pub const SYS_PORT_OUT: u64 = 21;
+pub const SYS_SPAWN_DESC: u64 = 22;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -47,6 +49,8 @@ const USER_TOP: u64 = 0x0000_8000_0000_0000;
 const MAX_LOG: u64 = 4096;
 const MAX_MEM_PAGES: u64 = 1024;
 const MAX_DMA_PAGES: u64 = 64;
+/// Capabilities a single `spawn` may hand to the new service.
+const MAX_SPAWN_GRANTS: u64 = 8;
 
 /// Layout of the `dev_info` buffer, in u64 words.
 pub const DEV_INFO_WORDS: usize = 14;
@@ -299,26 +303,6 @@ fn sys_dev_map(slot: u64, bar: u64) -> i64 {
 /// Create a supervised service from an ELF image held in a memory object.
 /// Needs a `Control` capability with `SPAWN` in `ctl_slot`.
 fn sys_spawn(ctl_slot: u64, mem_slot: u64, size: u64, name: u64) -> i64 {
-    let allowed = sched::with_current(|t| {
-        t.caps
-            .lookup(ctl_slot as u32, Rights::SPAWN)
-            .is_some_and(|c| c.is_control())
-    });
-    if !allowed {
-        return EPERM;
-    }
-    let Some(obj) = sched::with_current(|t| {
-        t.caps
-            .lookup(mem_slot as u32, Rights::MAP_READ)?
-            .memory()
-            .cloned()
-    }) else {
-        return EPERM;
-    };
-    let size = size as usize;
-    if size == 0 || size > obj.pages() * FRAME_SIZE as usize {
-        return EINVAL;
-    }
     // Name: pointer in the low 48 bits, length in the top 16.
     let (name_ptr, name_len) = (name & 0xFFFF_FFFF_FFFF, name >> 48);
     let Ok(name_bytes) = copy_from_user(name_ptr, name_len.min(32)) else {
@@ -327,7 +311,117 @@ fn sys_spawn(ctl_slot: u64, mem_slot: u64, size: u64, name: u64) -> i64 {
     let Ok(name) = core::str::from_utf8(&name_bytes) else {
         return EINVAL;
     };
+    match start_service(ctl_slot, mem_slot, size, name, &[], &[]) {
+        Ok(Some(id)) => id as i64,
+        Ok(None) => EINVAL,
+        Err(e) => e,
+    }
+}
 
+/// [`SYS_SPAWN_DESC`]: everything [`sys_spawn`] does plus the capabilities and
+/// launch arguments the new service starts with. The descriptor lives in the
+/// caller's address space:
+///
+/// ```text
+/// word 0  ctl_slot   1  mem_slot    2  size       3  name_ptr
+/// word 4  name_len   5  n_grants    6  arg_ptr    7  arg_len
+/// then n_grants × { slot, rights }
+/// ```
+///
+/// Each grant is derived from the caller's own table, so it can never carry
+/// more authority than the spawner holds (and needs `GRANT` to pass it on).
+/// The new task's capabilities are numbered in the order given, starting at
+/// slot 0, which is what the `caps=` launch argument reports to the service.
+fn sys_spawn_desc(desc: u64) -> i64 {
+    const WORDS: usize = 8;
+    let Ok(head) = copy_from_user(desc, (WORDS * 8) as u64) else {
+        return EFAULT;
+    };
+    let word = |i: usize| -> u64 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&head[i * 8..i * 8 + 8]);
+        u64::from_le_bytes(b)
+    };
+    let (ctl_slot, mem_slot, size) = (word(0), word(1), word(2));
+    let (name_ptr, name_len) = (word(3), word(4));
+    let n_grants = word(5);
+    let (arg_ptr, arg_len) = (word(6), word(7));
+
+    if n_grants > MAX_SPAWN_GRANTS || arg_len as usize > crate::mm::vmm::MAX_BOOT_ARGS {
+        return EINVAL;
+    }
+    let Ok(name_bytes) = copy_from_user(name_ptr, name_len.min(32)) else {
+        return EFAULT;
+    };
+    let Ok(name) = core::str::from_utf8(&name_bytes) else {
+        return EINVAL;
+    };
+    let mut grants = Vec::new();
+    if n_grants > 0 {
+        let table = desc + (WORDS * 8) as u64;
+        let Ok(raw) = copy_from_user(table, n_grants * 16) else {
+            return EFAULT;
+        };
+        for i in 0..n_grants as usize {
+            let mut s = [0u8; 8];
+            let mut r = [0u8; 8];
+            s.copy_from_slice(&raw[i * 16..i * 16 + 8]);
+            r.copy_from_slice(&raw[i * 16 + 8..i * 16 + 16]);
+            let slot = u64::from_le_bytes(s) as u32;
+            let rights = Rights(u32::from_le_bytes([r[0], r[1], r[2], r[3]]));
+            let Some(cap) =
+                sched::with_current(|t| t.caps.derive(slot, rights).map(|c| Grant::of(c)))
+            else {
+                return EPERM;
+            };
+            grants.push(cap);
+        }
+    }
+    let args = if arg_len == 0 {
+        Vec::new()
+    } else {
+        match copy_from_user(arg_ptr, arg_len) {
+            Ok(a) => a,
+            Err(e) => return e,
+        }
+    };
+    match start_service(ctl_slot, mem_slot, size, name, &grants, &args) {
+        Ok(Some(id)) => id as i64,
+        Ok(None) => EINVAL,
+        Err(e) => e,
+    }
+}
+
+/// Validate the spawn authority, copy the image out of the caller's memory
+/// object and hand both to the supervisor.
+fn start_service(
+    ctl_slot: u64,
+    mem_slot: u64,
+    size: u64,
+    name: &str,
+    grants: &[Grant],
+    args: &[u8],
+) -> Result<Option<sched::task::TaskId>, i64> {
+    let allowed = sched::with_current(|t| {
+        t.caps
+            .lookup(ctl_slot as u32, Rights::SPAWN)
+            .is_some_and(|c| c.is_control())
+    });
+    if !allowed {
+        return Err(EPERM);
+    }
+    let Some(obj) = sched::with_current(|t| {
+        t.caps
+            .lookup(mem_slot as u32, Rights::MAP_READ)?
+            .memory()
+            .cloned()
+    }) else {
+        return Err(EPERM);
+    };
+    let size = size as usize;
+    if size == 0 || size > obj.pages() * FRAME_SIZE as usize {
+        return Err(EINVAL);
+    }
     let mut image = Vec::with_capacity(size);
     for frame in obj.frames() {
         let take = (size - image.len()).min(FRAME_SIZE as usize);
@@ -337,10 +431,12 @@ fn sys_spawn(ctl_slot: u64, mem_slot: u64, size: u64, name: u64) -> i64 {
         let src = phys_to_virt(frame.start_address()).as_ptr::<u8>();
         image.extend_from_slice(unsafe { core::slice::from_raw_parts(src, take) });
     }
-    match crate::service::spawn_from_image(name, image) {
-        Some(id) => id as i64,
-        None => EINVAL,
-    }
+    Ok(crate::service::spawn_from_image(
+        name,
+        image,
+        grants.to_vec(),
+        args,
+    ))
 }
 
 /// Deliver an interrupt object's events to `ep_slot` (needs RECV on the irq).
@@ -460,6 +556,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_DEV_INFO => sys_dev_info(a0, a1),
         SYS_DEV_MAP => sys_dev_map(a0, a1),
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
+        SYS_SPAWN_DESC => sys_spawn_desc(a0),
         SYS_IRQ_BIND => sys_irq_bind(a0, a1),
         SYS_IRQ_ACK => sys_irq_ack(a0),
         SYS_DEV_IRQ => sys_dev_irq(a0),

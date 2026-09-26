@@ -1,6 +1,6 @@
 # K1K roadmap
 
-Stage: 1.0.0-alpha.1
+Stage: 1.0.0-alpha.2
 
 Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the first unfinished one.
 
@@ -28,10 +28,15 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [x] Services are loaded from `/SVC` on disk via `spawn`
 
 ## Files and service startup
-- [ ] File protocol (open/read over IPC) so services can read files themselves
-- [ ] Passing capabilities to spawned services
-- [ ] A service manifest on disk instead of "everything in /SVC"
-- [ ] An allocator for `k1k-rt`
+- [x] File protocol (`open`/`read`/`stat`/`list` over a shared buffer) so
+  services can read files themselves
+- [x] Capabilities and launch arguments passed to spawned services, in
+  manifest order, so a service finds its file server by name and not by slot
+  number
+- [x] A service manifest on disk instead of "everything in /SVC": only what
+  `/SVC/MANIFEST.TXT` lists is started
+- [x] A heap for every ring-3 task, with `k1k-rt` as its global allocator
+  (host-tested against its own block list, `make test-heap`)
 
 ## Kernel: time, notifications, revocation
 - [ ] Asynchronous notifications

@@ -38,6 +38,10 @@ struct EndpointInner {
 
 pub struct Endpoint {
     inner: Mutex<EndpointInner>,
+    /// The other half of a connected pair, if this endpoint has one. Sending
+    /// delivers to the peer's queue; the lock is only held long enough to clone
+    /// the `Arc`, so a send and a receive on opposite halves cannot deadlock.
+    peer: Mutex<Option<Arc<Endpoint>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,12 +53,33 @@ impl Endpoint {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(EndpointInner::default()),
+            peer: Mutex::new(None),
         })
+    }
+
+    /// A connected pair: sending on one half delivers to the other half's
+    /// queue. This is what lets a server keep the receiving half and hand out
+    /// the sending half — two different objects, so the rights on each can
+    /// stay one-directional instead of being intersected into nothing.
+    pub fn new_pair() -> (Arc<Self>, Arc<Self>) {
+        let a = Endpoint::new();
+        let b = Endpoint::new();
+        *a.peer.lock() = Some(b.clone());
+        *b.peer.lock() = Some(a.clone());
+        (a, b)
     }
 
     /// Deliver a message: straight into a waiting receiver's inbox if there is
     /// one (and wake it), otherwise queue it. Never blocks the sender.
     pub fn send(&self, msg: Message) -> Result<(), IpcError> {
+        let peer = self.peer.lock().clone();
+        match peer {
+            Some(p) => p.deliver(msg),
+            None => self.deliver(msg),
+        }
+    }
+
+    fn deliver(&self, msg: Message) -> Result<(), IpcError> {
         interrupts::without_interrupts(|| {
             let mut inner = self.inner.lock();
             let mut pending = Some(msg);

@@ -1,13 +1,90 @@
 //! K1K user-space runtime.
 //!
 //! Programs are `no_std`/`no_main`, define `k1k_main` with [`main!`] and get
-//! the process entry point, syscall wrappers, `log!` and a panic handler that
-//! reports through the kernel log and exits.
+//! the process entry point, syscall wrappers, `log!`, a heap allocator and a
+//! panic handler that reports through the kernel log and exits.
 
 #![no_std]
 
+extern crate alloc;
+
 use core::arch::{asm, naked_asm};
 use core::fmt::{self, Write};
+
+pub use heap::{HeapStats, heap_free, heap_stats};
+
+pub mod file;
+pub mod fsproto;
+pub mod heap;
+pub mod server;
+
+/// The page the supervisor fills before a ring-3 task starts. Must match
+/// `USER_INFO_BASE` in the kernel.
+pub const INFO_BASE: u64 = 0x0000_7fff_ffff_0000 - 0x0000_0000_0002_0000;
+const INFO_MAGIC: u64 = 0x3148_4F4F_425A_314B;
+const INFO_LAYOUT: u64 = 1;
+
+/// The first bytes of every ring-3 task, written by the supervisor.
+#[repr(C)]
+pub struct BootInfo {
+    pub magic: u64,
+    pub layout: u64,
+    pub task_id: u32,
+    pub _pad: u32,
+    pub heap_base: u64,
+    pub heap_size: u64,
+    pub stack_top: u64,
+    pub arg_len: u64,
+}
+
+/// The kernel's description of this task, or `None` if the boot info page is
+/// missing or was written by a kernel this runtime does not understand.
+pub fn boot_info() -> Option<&'static BootInfo> {
+    let p = unsafe { &*(INFO_BASE as *const BootInfo) };
+    (p.magic == INFO_MAGIC && p.layout == INFO_LAYOUT).then_some(p)
+}
+
+/// The launch arguments the spawner attached, as `key=value` lines.
+pub fn args() -> &'static str {
+    let Some(info) = boot_info() else {
+        return "";
+    };
+    let len = (info.arg_len as usize).min(MAX_ARGS);
+    let base = unsafe { (INFO_BASE as *const u8).add(core::mem::size_of::<BootInfo>()) };
+    let bytes = unsafe { core::slice::from_raw_parts(base, len) };
+    core::str::from_utf8(bytes)
+        .unwrap_or("")
+        .trim_end_matches('\0')
+}
+
+/// One `key=value` pair from the launch arguments.
+pub fn arg(key: &str) -> Option<&'static str> {
+    args().lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == key).then(|| v.trim())
+    })
+}
+
+/// The capability slot the manifest granted under `name`, if any.
+///
+/// A service spawned from disk finds its file-server endpoint with
+/// `granted("fs")` instead of assuming a slot number: the supervisor numbers
+/// the capabilities in the order the manifest listed them and passes the
+/// mapping to the service in the `caps=` argument.
+pub fn granted(name: &str) -> Option<Cap> {
+    let caps = arg("caps")?;
+    for item in caps.split(',') {
+        if let Some((n, slot)) = item.split_once('=')
+            && n.trim() == name
+        {
+            return slot.trim().parse::<u32>().ok().map(Cap);
+        }
+    }
+    None
+}
+
+/// How much of the boot info page's argument area the kernel fills.
+pub const MAX_ARGS: usize = 1024;
 
 pub mod sys {
     pub const LOG: u64 = 0;
@@ -32,7 +109,14 @@ pub mod sys {
     pub const DEV_IRQ: u64 = 19;
     pub const PORT_IN: u64 = 20;
     pub const PORT_OUT: u64 = 21;
+    /// `spawn` with a descriptor: image, name, capabilities and arguments.
+    pub const SPAWN_DESC: u64 = 22;
 }
+
+/// Maximum capabilities one `spawn` can hand over.
+pub const MAX_SPAWN_GRANTS: usize = 8;
+/// Maximum launch-argument blob a `spawn` can attach.
+pub const MAX_SPAWN_ARGS: usize = 1024;
 
 /// Wire protocol of the `blk` block-device service.
 pub mod blkproto {
@@ -307,16 +391,64 @@ pub fn port_out(ports: Cap, offset: u16, width: u8, value: u32) -> Result<()> {
 /// Start a supervised service from the ELF image in `image` (`size` bytes).
 /// Requires a `Control` capability with `SPAWN`. Returns the new task id.
 pub fn spawn(control: Cap, image: Cap, size: usize, name: &str) -> Result<u32> {
+    spawn_with(control, image, size, name, &[], "")
+}
+
+/// A capability to hand a service being spawned, with the rights it may keep.
+pub struct Grant {
+    pub cap: Cap,
+    pub rights: u32,
+}
+
+impl Grant {
+    /// Hand `cap` over in full, minus the rights the spawner lacks anyway.
+    pub fn full(cap: Cap) -> Self {
+        Self {
+            cap,
+            rights: u32::MAX,
+        }
+    }
+
+    /// Hand `cap` over with exactly these rights.
+    pub fn with(cap: Cap, rights: u32) -> Self {
+        Self { cap, rights }
+    }
+}
+
+/// Start a supervised service with capabilities and launch arguments.
+///
+/// `grants` become the new task's capability slots 0..n in order, each reduced
+/// to the rights given here (never more than the spawner holds). `args` is a
+/// `key=value` blob the service reads with [`arg`] — it is how a manifest
+/// tells a service which slot its file-server endpoint ended up in.
+pub fn spawn_with(
+    control: Cap,
+    image: Cap,
+    size: usize,
+    name: &str,
+    grants: &[Grant],
+    args: &str,
+) -> Result<u32> {
     let name = &name.as_bytes()[..name.len().min(32)];
-    let packed = (name.as_ptr() as u64 & 0xFFFF_FFFF_FFFF) | (name.len() as u64) << 48;
-    check(syscall(
-        sys::SPAWN,
-        control.0 as u64,
-        image.0 as u64,
-        size as u64,
-        packed,
-    ))
-    .map(|id| id as u32)
+    if grants.len() > MAX_SPAWN_GRANTS || args.len() > MAX_SPAWN_ARGS {
+        return Err(Error::Inval);
+    }
+    // [ctl, mem, size, name_ptr, name_len, n_grants, arg_ptr, arg_len] then
+    // n_grants × { slot, rights }.
+    let mut desc = [0u64; 8 + 2 * MAX_SPAWN_GRANTS];
+    desc[0] = control.0 as u64;
+    desc[1] = image.0 as u64;
+    desc[2] = size as u64;
+    desc[3] = name.as_ptr() as u64;
+    desc[4] = name.len() as u64;
+    desc[5] = grants.len() as u64;
+    desc[6] = args.as_ptr() as u64;
+    desc[7] = args.len() as u64;
+    for (i, g) in grants.iter().enumerate() {
+        desc[8 + i * 2] = g.cap.0 as u64;
+        desc[9 + i * 2] = g.rights as u64;
+    }
+    check(syscall(sys::SPAWN_DESC, desc.as_mut_ptr() as u64, 0, 0, 0)).map(|id| id as u32)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

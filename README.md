@@ -68,16 +68,35 @@ a FAT volume.
   I/O APIC, or a PCI function's MSI-X entry) delivers each interrupt as a
   message on an endpoint the driver chose; a port capability grants a range
   of x86 I/O ports. The kernel has no keyboard or disk code at all.
-- Ring-3 tasks with `syscall`/`sysret`; 22 syscalls: `log`, `exit`, `yield`,
+- Connected endpoints: a pair of endpoints where sending on one half delivers
+  to the other. A server keeps the receiving half and hands out the sending
+  one, so authority over a channel can be delegated without ever widening
+  rights — intersecting a `RECV` right with a `SEND` mask would leave nothing.
+- Ring-3 tasks with `syscall`/`sysret`; 23 syscalls: `log`, `exit`, `yield`,
   `sleep`, `send`, `recv`, `info`, `send_cap`, `cap_drop`, `mem_create`,
   `mem_map`, `ep_create`, `mem_create_dma`, `mem_phys`, `dev_info`, `dev_map`,
-  `spawn`, `irq_bind`, `irq_ack`, `dev_irq`, `port_in`, `port_out`. All
-  registers except `rax/rcx/r11` are preserved across a syscall.
+  `spawn`, `irq_bind`, `irq_ack`, `dev_irq`, `port_in`, `port_out`,
+  `spawn_desc`. All registers except `rax/rcx/r11` are preserved across a
+  syscall.
+- Every ring-3 task gets a private 4 MiB heap and a boot-info page: the
+  supervisor maps both before the task can run and tells the runtime where the
+  heap is, which launch arguments the spawner attached and which slot each
+  granted capability ended up in.
 - User space comes from disk: the kernel image embeds only the drivers and
-  the file-system server; `fs` mounts the FAT volume and `spawn`s every ELF
-  under `/SVC` as a supervised service (a `Control` capability with the
-  `SPAWN` right is the authority to do so). Crashed disk-loaded services are
-  restarted from the retained image like any other.
+  the file-system server; `fs` mounts the FAT volume, reads
+  `/SVC/MANIFEST.TXT` and starts exactly the services listed there (a `Control`
+  capability with the `SPAWN` right is the authority to do so). Dropping a file
+  into `/SVC` no longer runs it. Crashed disk-loaded services are restarted
+  from the retained image, with the same capabilities and arguments, like any
+  other.
+- A service starts with the capabilities its manifest line names: `spawn_desc`
+  hands the new task a list of `(slot, rights)` pairs derived from the spawner's
+  own table, so a service can only ever pass on authority that already exists,
+  and never more than it holds.
+- The file service is a real server: any service holding the `fs` capability
+  can `open`, `read`, `stat` and `list` over a shared buffer, with the server
+  tracking each client by task and replying only on the endpoint that client
+  registered.
 - Static ELF64 loader: services are ordinary Rust `no_std` programs built
   against the `k1k-rt` runtime crate (`user/`), with R/RX/RW segment
   permissions applied per `PT_LOAD`.
@@ -91,9 +110,15 @@ a FAT volume.
   top of `blk`, doubling as init;
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
   grants to `ping` as a capability.
-- Services on the disk (`/SVC`): `hello`, and `flaky`, which dereferences NULL
-  every third iteration and is brought back without a reboot. A service that
-  exits with code 0 is considered finished and not restarted.
+- Services on the disk (`/SVC`): `hello`, which lists `/SVC` and reads
+  `/README.TXT` through the file protocol using the capability its manifest line
+  granted it, and `flaky`, which dereferences NULL every third iteration and is
+  brought back without a reboot. A service that exits with code 0 is considered
+  finished and not restarted.
+- A heap for services: `k1k-rt` turns the per-task heap into a global allocator
+  (first fit, free list in address order, in-place `realloc`), so services can
+  use `Box`, `Vec`, `String` and `format!`. It is tested on the host against an
+  independent reading of its own block list (`make test-heap`).
 
 ```
 [superv] nvme 00:03.0 handed to service 'blk'

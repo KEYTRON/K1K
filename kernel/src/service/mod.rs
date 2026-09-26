@@ -16,7 +16,10 @@ use crate::arch::x86_64::{context, gdt, interrupts as irq, irq as irqobj, pci};
 use crate::ipc::Endpoint;
 use crate::klog;
 use crate::loader;
-use crate::mm::vmm::{AddressSpace, Flags, USER_STACK_TOP};
+use crate::mm::vmm::{
+    AddressSpace, BOOT_INFO_LAYOUT, BOOT_INFO_MAGIC, BootInfo, Flags, MAX_BOOT_ARGS,
+    USER_HEAP_BASE, USER_HEAP_PAGES, USER_INFO_BASE, USER_STACK_TOP,
+};
 use crate::obj::{Capability, DeviceObject, Object, PortRange, Rights};
 use crate::sched::{self, UserEntry, task::Task};
 
@@ -25,6 +28,7 @@ const MAX_RESTARTS_BEFORE_BACKOFF: u32 = 3;
 const MAX_SERVICES: usize = 64;
 
 /// A capability handed to a service at start (and on every restart).
+#[derive(Clone)]
 pub struct Grant {
     pub object: Object,
     pub rights: Rights,
@@ -37,6 +41,15 @@ impl Grant {
             rights,
         }
     }
+
+    /// Keep an already-derived capability as a grant, so a service spawned at
+    /// runtime restarts with the same slots in the same order.
+    pub fn of(cap: Capability) -> Self {
+        Self {
+            object: cap.object,
+            rights: cap.rights,
+        }
+    }
 }
 
 pub struct ServiceSpec {
@@ -45,6 +58,9 @@ pub struct ServiceSpec {
     pub grants: Vec<Grant>,
     /// Loaded from disk at runtime rather than embedded in the kernel.
     pub dynamic: bool,
+    /// Launch arguments handed to the service, kept so a restart sees the
+    /// same ones. Copied into the task's boot info page.
+    pub args: &'static [u8],
 }
 
 pub struct ServiceState {
@@ -103,6 +119,7 @@ pub fn init_builtin() {
             },
         ],
         dynamic: false,
+        args: b"",
     });
 
     // Storage driver: slot 0 = the first NVMe controller, slot 1 = request queue.
@@ -129,9 +146,18 @@ pub fn init_builtin() {
         image: BLK,
         grants: blk_grants,
         dynamic: false,
+        args: b"",
     });
 
-    // File system + init: slot 0 = blk requests, slot 1 = spawn authority.
+    // File system + init: slot 0 = blk requests, slot 1 = spawn authority,
+    // slot 2 = the file service's receiving half, slot 3 = the half it hands
+    // out so a service can call the file service.
+    //
+    // The two halves are separate objects linked to each other, which is what
+    // makes the handout work: `fs` may only receive, a client may only send, and
+    // no rights have to be widened to pass authority along. `fs` is init, so the
+    // manifest on disk decides which of its capabilities it may delegate.
+    let (fs_serve, fs_call) = Endpoint::new_pair();
     register(ServiceSpec {
         name: "fs",
         image: FS,
@@ -139,10 +165,13 @@ pub fn init_builtin() {
             Grant::endpoint(&blk_req, Rights::SEND),
             Grant {
                 object: Object::Control,
-                rights: Rights::SPAWN,
+                rights: Rights::SPAWN.union(Rights::GRANT),
             },
+            Grant::endpoint(&fs_serve, Rights::RECV),
+            Grant::endpoint(&fs_call, Rights::SEND.union(Rights::GRANT)),
         ],
         dynamic: false,
+        args: b"",
     });
 
     register(ServiceSpec {
@@ -153,6 +182,7 @@ pub fn init_builtin() {
             Grant::endpoint(&rep, Rights::SEND),
         ],
         dynamic: false,
+        args: b"",
     });
     register(ServiceSpec {
         name: "ping",
@@ -162,38 +192,49 @@ pub fn init_builtin() {
             Grant::endpoint(&rep, Rights::RECV),
         ],
         dynamic: false,
+        args: b"",
     });
 }
 
 /// Register a service from an ELF image obtained at runtime and start it.
-/// The image and name are kept for the lifetime of the kernel so the
-/// supervisor can restart the service.
-pub fn spawn_from_image(name: &str, image: Vec<u8>) -> Option<sched::task::TaskId> {
+/// The image, name, capabilities and arguments are kept for the lifetime of
+/// the kernel so the supervisor can restart the service with exactly the same
+/// authority it was given the first time.
+pub fn spawn_from_image(
+    name: &str,
+    image: Vec<u8>,
+    grants: Vec<Grant>,
+    args: &[u8],
+) -> Option<sched::task::TaskId> {
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_graphic()) {
         return None;
     }
     let name: &'static str = Box::leak(String::from(name).into_boxed_str());
     let image: &'static [u8] = Box::leak(image.into_boxed_slice());
+    let args: &'static [u8] = Box::leak(args.to_vec().into_boxed_slice());
+    let n_grants = grants.len();
     let idx = register(ServiceSpec {
         name,
         image,
-        grants: Vec::new(),
+        grants,
         dynamic: true,
+        args,
     })?;
     let id = spawn(idx)?;
     klog!(
         "superv",
-        "spawned '{}' from disk as task {} ({} KiB ELF)",
+        "spawned '{}' from disk as task {} ({} KiB ELF, {} capability slot(s))",
         name,
         id,
-        image.len() / 1024
+        image.len() / 1024,
+        n_grants
     );
     Some(id)
 }
 
 /// Build a fresh ring-3 task for service `idx` and make it runnable.
 pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
-    let (name, image, grants) = {
+    let (name, image, grants, args) = {
         let s = SERVICES.lock();
         let st = s.get(idx)?;
         let grants: Vec<Capability> = st
@@ -205,9 +246,12 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
                 rights: g.rights,
             })
             .collect();
-        (st.spec.name, st.spec.image, grants)
+        (st.spec.name, st.spec.image, grants, st.spec.args)
     };
 
+    // The id is reserved up front: the boot info page carries it, and the page
+    // has to be in place before any CPU can enter the new task.
+    let id = sched::reserve_task_id();
     let mut asp = AddressSpace::new()?;
     let loaded = match loader::load(&mut asp, image) {
         Ok(l) => l,
@@ -229,7 +273,24 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
     )
     .ok()?;
 
-    let mut t: Box<Task> = Task::new_kernel(0, name, user_task_entry, 0);
+    // The service heap its runtime allocates from, and the page that tells it
+    // where that heap is. Both belong to the address space, so a restart gets
+    // a fresh, zeroed heap.
+    asp.map_user_range(
+        VirtAddr::new(USER_HEAP_BASE),
+        USER_HEAP_PAGES,
+        Flags::WRITABLE | Flags::NO_EXECUTE,
+    )
+    .ok()?;
+    asp.map_user_range(
+        VirtAddr::new(USER_INFO_BASE),
+        1,
+        Flags::WRITABLE | Flags::NO_EXECUTE,
+    )
+    .ok()?;
+    write_boot_info(&mut asp, id, name, args)?;
+
+    let mut t: Box<Task> = Task::new_kernel(id, name, user_task_entry, 0);
     t.addr_space = Some(asp);
     t.user = Some(UserEntry {
         rip: loaded.entry,
@@ -239,9 +300,48 @@ pub fn spawn(idx: usize) -> Option<sched::task::TaskId> {
     for cap in grants {
         t.caps.insert(cap);
     }
-    let id = sched::add_task(t);
-    SERVICES.lock()[idx].task = Some(id);
+    sched::publish_task(t, id);
+    {
+        let mut s = SERVICES.lock();
+        s[idx].task = Some(id);
+    }
     Some(id)
+}
+
+/// Fill a new task's [`USER_INFO_BASE`] page: heap and stack bounds plus the
+/// arguments its spawner attached.
+fn write_boot_info(
+    asp: &mut AddressSpace,
+    task: sched::task::TaskId,
+    name: &str,
+    args: &[u8],
+) -> Option<()> {
+    let n = args.len().min(MAX_BOOT_ARGS);
+    let head = core::mem::size_of::<BootInfo>();
+    let mut page = [0u8; 4096];
+    let info = BootInfo {
+        magic: BOOT_INFO_MAGIC,
+        layout: BOOT_INFO_LAYOUT,
+        task_id: task,
+        _pad: 0,
+        heap_base: USER_HEAP_BASE,
+        heap_size: (USER_HEAP_PAGES * 4096) as u64,
+        stack_top: USER_STACK_TOP,
+        arg_len: n as u64,
+    };
+    page[..head].copy_from_slice(unsafe {
+        core::slice::from_raw_parts(&info as *const BootInfo as *const u8, head)
+    });
+    page[head..head + n].copy_from_slice(&args[..n]);
+    page[head + n] = 0;
+
+    let va = VirtAddr::new(USER_INFO_BASE);
+    asp.write_user(va, &page[..head + n + 1]);
+    if asp.translate(va).is_none() {
+        klog!("superv", "WARNING: no boot info page for '{}'", name);
+        return None;
+    }
+    Some(())
 }
 
 extern "C" fn user_task_entry(_: u64) {

@@ -135,11 +135,18 @@ unsafe extern "C" fn kmain() -> ! {
     service::init_builtin();
     service::start_all();
 
-    let autotest = boot::cmdline_has("autotest");
+    // `autotest` runs the services and exits; `autotest=<seconds>` says for how
+    // long, which is what the soak test uses.
+    let autotest = boot::cmdline_has("autotest") || boot::cmdline_value("autotest").is_some();
+    let autotest_ms = boot::cmdline_u64("autotest").unwrap_or(8).clamp(1, 600) * 1000;
     if autotest {
-        klog!("k1k", "autotest mode: running services for 8 s");
+        klog!(
+            "k1k",
+            "autotest mode: running services for {} s",
+            autotest_ms / 1000
+        );
     }
-    let deadline = arch::x86_64::interrupts::uptime_ms() + 8000;
+    let deadline = arch::x86_64::interrupts::uptime_ms() + autotest_ms;
     loop {
         x86_64::instructions::hlt();
         if autotest && arch::x86_64::interrupts::uptime_ms() >= deadline {
