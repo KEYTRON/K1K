@@ -68,6 +68,13 @@ a FAT volume.
   I/O APIC, or a PCI function's MSI-X entry) delivers each interrupt as a
   message on an endpoint the driver chose; a port capability grants a range
   of x86 I/O ports. The kernel has no keyboard or disk code at all.
+- Inter-processor interrupts: a broadcast with per-CPU acknowledgement, used to
+  invalidate TLB entries before an address space is freed or a shared kernel
+  mapping changes, and to pull an idle CPU back into the scheduler when a task
+  becomes runnable. The boot test fails if any CPU does not acknowledge.
+- The bootloader's memory goes back to the allocator once boot is done with it
+  (11 MiB under QEMU, 55 MiB after OVMF): the command line is copied out first,
+  and the test proves it by reading the copy afterwards.
 - Connected endpoints: a pair of endpoints where sending on one half delivers
   to the other. A server keeps the receiving half and hands out the sending
   one, so authority over a channel can be delegated without ever widening

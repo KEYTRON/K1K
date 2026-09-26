@@ -13,6 +13,7 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 use super::pmm::{self, GlobalFrameAllocator, phys_to_virt};
+use crate::arch::x86_64::percpu;
 use crate::obj::MemoryObject;
 
 pub use x86_64::structures::paging::PageTableFlags as Flags;
@@ -91,6 +92,21 @@ pub fn init() {
     crate::klog!("vmm", "kernel PML4 ready ({} PDPTs pre-populated)", added);
 }
 
+/// Kernel-half mappings are global, so a change to them is invisible to a CR3
+/// reload on every CPU: tell them all once the mapping is in place.
+fn announce_shared(start: VirtAddr, len: u64) {
+    if percpu::count() > 1 {
+        crate::klog!(
+            "vmm",
+            "shared map {:#x}..{:#x} on {} cpus",
+            start.as_u64(),
+            start.as_u64() + len,
+            percpu::count()
+        );
+        crate::arch::x86_64::ipi::flush_shared_range(start, VirtAddr::new(start.as_u64() + len));
+    }
+}
+
 /// Map `count` fresh frames at `start` in the kernel address space.
 pub fn map_kernel_pages(
     start: VirtAddr,
@@ -113,6 +129,7 @@ pub fn map_kernel_pages(
                 .flush();
         }
     }
+    announce_shared(start, (count * pmm::FRAME_SIZE as usize) as u64);
     Ok(())
 }
 
@@ -123,6 +140,7 @@ fn map_phys_range(phys: PhysAddr, len: u64, extra: PageTableFlags) {
     let mut alloc = GlobalFrameAllocator;
     let start = phys.as_u64() & !(pmm::FRAME_SIZE - 1);
     let end = (phys.as_u64() + len + pmm::FRAME_SIZE - 1) & !(pmm::FRAME_SIZE - 1);
+    let mut added = 0u64;
     let mut p = start;
     while p < end {
         let va = phys_to_virt(PhysAddr::new(p));
@@ -143,9 +161,17 @@ fn map_phys_range(phys: PhysAddr, len: u64, extra: PageTableFlags) {
                     )
                     .expect("map_phys_range")
                     .flush();
+                added += pmm::FRAME_SIZE;
             }
         }
         p += pmm::FRAME_SIZE;
+    }
+    if added > 0 {
+        // Only pages we actually added can be stale anywhere.
+        announce_shared(
+            VirtAddr::new(phys_to_virt(PhysAddr::new(start)).as_u64()),
+            added,
+        );
     }
 }
 
@@ -380,6 +406,15 @@ fn free_table_recursive(frame: Option<PhysFrame>, level: u8) {
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         assert!(!self.is_current(), "dropping the active address space");
+        // The frames behind these tables go straight back to the allocator, so
+        // no CPU may still have this address space cached: a stale entry there
+        // would be a stale entry onto somebody else's memory. Another CPU can
+        // only have it loaded if a task of ours is running there, which the
+        // supervisor rules out before a task is reaped — this makes the
+        // guarantee hold even if that ever changes.
+        if percpu::count() > 1 {
+            crate::arch::x86_64::ipi::shootdown_all(self.pml4.start_address());
+        }
         self.unmap_shared();
         self.free_user_half();
         pmm::free_frame(self.pml4);

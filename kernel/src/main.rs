@@ -166,14 +166,19 @@ unsafe extern "C" fn kmain() -> ! {
         arch::x86_64::interrupts::uptime_ms()
     );
     let mut ap_switches = 0u64;
+    let mut ipi_total = 0u32;
     for cpu in 0..arch::x86_64::percpu::count() {
         if let Some(pc) = arch::x86_64::percpu::by_id(cpu) {
+            let (sent, done) = arch::x86_64::ipi::stats(pc);
+            ipi_total += sent;
             klog!(
                 "smp",
-                "cpu {} (lapic {}): {} context switches",
+                "cpu {} (lapic {}): {} context switches, {} IPIs ({} acknowledged)",
                 pc.cpu_id,
                 pc.lapic_id,
-                pc.switches
+                pc.switches,
+                sent,
+                done
             );
             if cpu > 0 {
                 ap_switches += pc.switches;
@@ -201,6 +206,12 @@ unsafe extern "C" fn kmain() -> ! {
     if !mm::pmm::bootloader_reclaimed() {
         klog!("k1k", "FAIL: bootloader memory was never reclaimed");
     }
+    // Every IPI the kernel sends is a TLB flush or a reschedule, and both are
+    // synchronous where it matters: a request that was never acknowledged would
+    // mean a stale TLB somewhere, so treat that as a failure.
+    if ipi_total > 0 && ap_ipi_gap() {
+        klog!("k1k", "FAIL: some IPIs were never acknowledged");
+    }
     if flaky_restarts >= 2 && smp_ok && mm::pmm::bootloader_reclaimed() {
         klog!(
             "k1k",
@@ -212,6 +223,16 @@ unsafe extern "C" fn kmain() -> ! {
         klog!("k1k", "FAIL: flaky service was not restarted");
         arch::x86_64::qemu_exit(0x11);
     }
+}
+
+/// Whether any CPU acknowledged fewer IPIs than it was sent.
+fn ap_ipi_gap() -> bool {
+    (0..arch::x86_64::percpu::count()).any(|cpu| {
+        arch::x86_64::percpu::by_id(cpu).is_some_and(|pc| {
+            let (sent, done) = arch::x86_64::ipi::stats(pc);
+            sent != done
+        })
+    })
 }
 
 extern "C" fn kthread_ticker(period_ms: u64) {

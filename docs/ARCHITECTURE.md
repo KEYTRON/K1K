@@ -93,6 +93,41 @@ Ring 3 is entered from the task's kernel thread with `iretq`
 kernel stack (`PerCpu.kstack_top`, also mirrored into this CPU's `TSS.rsp0`
 for interrupts), so nested traps and preemption inside syscalls just work.
 
+## Inter-processor interrupts
+
+`arch/x86_64/ipi.rs`. Two things need to reach another CPU: a TLB invalidation
+and a nudge back into the scheduler. Both are sent as one broadcast and both are
+synchronous — the request is published in every other CPU's per-CPU slot, and
+the sender waits until each of them has reported back. A shootdown that only
+*asked* would be worth nothing: the point is that when it returns, every CPU has
+dropped the mapping.
+
+Delivery is logical with the "all processors except self" shorthand
+(`ICR = vector | (2 << 18) | (1 << 11)`). A directed physical IPI is the obvious
+alternative and it does not work here: QEMU's local APIC accepts the command and
+then drops it for every destination except the sender, so a shootdown would look
+like it had worked while doing nothing. Each request carries its own number, so
+an acknowledgement can only ever refer to the request that was actually taken.
+
+Requests the kernel sends today:
+
+- `TlbAll { cr3 }` before an address space is freed (`AddressSpace::drop`): the
+  frames behind the tables go straight back to the allocator, and a stale entry
+  on any CPU would be a stale entry onto somebody else's memory. The supervisor
+  already refuses to reap a task that is still on a CPU, so this is the second
+  line of defence rather than the only one.
+- `SharedRange { start, end }` after a change to the shared kernel half. Those
+  mappings carry the global bit, so a CR3 reload would never drop them.
+- `Resched` when a task becomes runnable and some other CPU is sitting in `hlt`
+  with an empty run queue: the target goes back through the scheduler, which is
+  what a timer tick does.
+- `Ping`, once, right after the application processors come up. If that does not
+  come back from every CPU, IPIs are not reaching them and every later shootdown
+  would be silently useless, so the boot log says so out loud.
+
+The boot summary prints, per CPU, how many IPIs it was sent and how many it
+acknowledged, and the autotest fails if those differ.
+
 ## SMP and per-CPU state
 
 The bootstrap processor discovers the others through the Limine MP response
@@ -366,6 +401,24 @@ Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 
 User pointers are validated against the lower half and translated through the
 task's own page tables before the kernel touches them.
+
+## The bootloader's memory
+
+Limine marks the memory it no longer needs as reclaimable — 11 MiB under QEMU,
+55 MiB after OVMF — and the kernel used to keep all of it. Giving it back is
+only safe once boot is done with Limine, so `boot::init` copies the command line
+into the kernel and `pmm::init` records the reclaimable ranges, and
+`pmm::reclaim_bootloader` frees them after the application processors are up
+(they read Limine's structures as they come up). ACPI is parsed into owned
+structures and the framebuffer console copied its geometry before that point, so
+nothing reads a response afterwards.
+
+For the reclaim to be worth anything the bitmap has to reach those frames, which
+sit *above* RAM; it is therefore sized from the highest usable or reclaimable
+address, with a budget of an eighth of the largest usable region. Past that the
+extra memory is kept and the log says so. The autotest reads the command line
+*after* the reclaim and fails if the reclaim did not happen, so a dangling
+pointer to a Limine response cannot slip through unnoticed.
 
 ## Testing
 

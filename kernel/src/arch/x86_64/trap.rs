@@ -5,7 +5,7 @@
 use core::arch::global_asm;
 use x86_64::registers::control::Cr2;
 
-use super::{apic, idt, interrupts, percpu};
+use super::{apic, idt, interrupts, ipi, percpu};
 use crate::{klog, println};
 
 global_asm!(include_str!("trap_stubs.s"));
@@ -89,6 +89,7 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     match vector {
         0..=31 => exception(frame),
         idt::IRQ_TIMER => interrupts::on_timer(),
+        ipi::IPI_VECTOR => ipi::on_ipi(),
         apic::SPURIOUS_VECTOR => {}
         _ => super::irq::on_vector(vector),
     }

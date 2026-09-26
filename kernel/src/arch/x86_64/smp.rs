@@ -56,7 +56,13 @@ pub fn start_aps() {
         }
         next_id += 1;
     }
-    klog!("smp", "{} cpu(s) online", percpu::count());
+    let online = percpu::count();
+    klog!("smp", "{online} cpu(s) online");
+    if super::ipi::selftest() {
+        klog!("smp", "IPI round trip: all {online} cpu(s) answered");
+    } else {
+        klog!("smp", "WARNING: some cpus did not answer an IPI");
+    }
 }
 
 struct ApBoot {

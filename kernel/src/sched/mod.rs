@@ -17,7 +17,7 @@ use x86_64::VirtAddr;
 use x86_64::instructions::interrupts;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 
-use crate::arch::x86_64::{context, gdt, interrupts as irq, percpu};
+use crate::arch::x86_64::{context, gdt, interrupts as irq, ipi, percpu};
 use crate::klog;
 use task::{State, Task, TaskId};
 
@@ -235,6 +235,7 @@ pub fn mark_blocked() {
 }
 
 pub fn wake(id: TaskId) {
+    let mut queued = false;
     interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
         if let Some(t) = s.tasks.get_mut(&id)
@@ -243,9 +244,33 @@ pub fn wake(id: TaskId) {
             t.state = State::Ready;
             if t.on_cpu.is_none() {
                 s.ready.push_back(id);
+                queued = true;
             }
         }
     });
+    if queued {
+        // Somebody is waiting in `hlt` with nothing to do; tell it so the task
+        // starts now instead of at the next tick.
+        kick_idle_cpu();
+    }
+}
+
+/// Nudge one idle CPU back into the scheduler. Fire and forget: if the CPU is
+/// busy after all, the run queue is shared and it will pick the task up when it
+/// next goes idle.
+fn kick_idle_cpu() {
+    let me = percpu::cpu_id();
+    for cpu in 0..percpu::count() {
+        if cpu as u32 == me {
+            continue;
+        }
+        if let Some(pc) = percpu::by_id(cpu)
+            && pc.current == pc.idle_task
+        {
+            ipi::kick(cpu);
+            return;
+        }
+    }
 }
 
 pub fn exit_current(code: i64) -> ! {

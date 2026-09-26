@@ -1,6 +1,6 @@
 # K1K roadmap
 
-Stage: 1.0.0-alpha.2
+Stage: 1.0.0-alpha.3
 
 Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the first unfinished one.
 
@@ -40,11 +40,14 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 
 ## Kernel: time, notifications, revocation
 - [ ] Asynchronous notifications
-- [ ] IPIs: TLB shootdown and remote rescheduling
+- [x] IPIs: TLB shootdown (before an address space is freed, and after a change
+  to the shared kernel half) and remote rescheduling (a woken task pulls an idle
+  CPU out of `hlt` instead of waiting for the next tick)
 - [ ] HPET/TSC clocks
 - [ ] Capability revocation
 - [ ] A scheduler without a single global lock
-- [ ] A growing kernel heap and returning bootloader memory to the PMM
+- [x] Returning the bootloader's memory to the PMM
+- [ ] A growing kernel heap (still a fixed 16 MiB window)
 
 ## K1OS on K1K
 - [x] K1OS boots on K1K (boot test in CI on every push)

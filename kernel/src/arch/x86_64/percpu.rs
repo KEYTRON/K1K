@@ -5,7 +5,7 @@
 
 use alloc::boxed::Box;
 use core::arch::asm;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{GsBase, KernelGsBase};
 use x86_64::structures::tss::TaskStateSegment;
@@ -35,6 +35,13 @@ pub struct PerCpu {
     pub prev_pending: TaskId,
     pub switches: u64,
     pub tss: *mut TaskStateSegment,
+    /// Work handed to this CPU by an IPI; see [`super::ipi`].
+    pub ipi_slot: spin::Mutex<Option<super::ipi::Pending>>,
+    /// Bumped when a request is published, acknowledged when it is done.
+    pub ipi_seq: AtomicU32,
+    pub ipi_done: AtomicU32,
+    /// Set when a reschedule request arrives, cleared when it is acted on.
+    pub resched: AtomicBool,
 }
 
 const _: () = {
@@ -61,6 +68,10 @@ impl PerCpu {
             prev_pending: NO_TASK,
             switches: 0,
             tss: core::ptr::null_mut(),
+            ipi_slot: spin::Mutex::new(None),
+            ipi_seq: AtomicU32::new(0),
+            ipi_done: AtomicU32::new(0),
+            resched: AtomicBool::new(false),
         }
     }
 }

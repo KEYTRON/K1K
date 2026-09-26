@@ -15,6 +15,18 @@ const LAPIC_TIMER_INIT: u32 = 0x380;
 const LAPIC_TIMER_CUR: u32 = 0x390;
 const LAPIC_TIMER_DIV: u32 = 0x3E0;
 const LAPIC_TPR: u32 = 0x080;
+/// Interrupt command register: bits 0-7 vector, 8-10 delivery mode, 11
+/// destination mode (0 = physical), 12 delivery status, 24-31 the low 8 bits of
+/// the destination APIC id.
+const LAPIC_ICR: u32 = 0x300;
+/// ICR bit 12: a delivery is in progress. The APIC holds one command at a
+/// time, so a busy bit means the previous IPI has not been taken yet — which,
+/// on a target that is inside a critical section, can be for a while.
+const ICR_BUSY: u32 = 1 << 12;
+/// LVT entries start here; the timer at vector 0x20 lands at 0x220 + 0x100.
+const LAPIC_LVT_BASE: u32 = 0x220;
+/// LVT delivery mode "fixed", unmasked.
+const LVT_FIXED: u32 = 0x400;
 
 const TIMER_PERIODIC: u32 = 1 << 17;
 const LVT_MASKED: u32 = 1 << 16;
@@ -42,6 +54,30 @@ pub fn lapic_id() -> u8 {
     (lapic_read(LAPIC_ID) >> 24) as u8
 }
 
+/// Broadcast `vector` to every other processor, reporting whether the APIC
+/// accepted it.
+///
+/// Delivery is logical with the "all processors except self" shorthand, which
+/// is the form that works on real hardware and on QEMU alike; a directed
+/// physical IPI is accepted by QEMU's local APIC and then quietly dropped for
+/// anything but the sending CPU, so relying on it would leave every shootdown
+/// looking like it had worked. Each target reports back through its own
+/// per-CPU slot, so the sender still learns exactly who did the work.
+///
+/// No "wait for delivery" bit: a target with interrupts disabled holds the
+/// delivery status bit set for as long as it stays disabled, so waiting on it
+/// would block the sender for reasons that have nothing to do with the
+/// interrupt. Waiting for the acknowledgement is the real synchronisation.
+pub fn send_broadcast_ipi(vector: u8) -> bool {
+    if lapic_read(LAPIC_ICR) & ICR_BUSY != 0 {
+        return false;
+    }
+    const LOGICAL: u32 = 1 << 11;
+    const ALL_BUT_SELF: u32 = 2 << 18;
+    lapic_write(LAPIC_ICR, LOGICAL | ALL_BUT_SELF | vector as u32);
+    true
+}
+
 pub fn eoi() {
     lapic_write(LAPIC_EOI, 0);
 }
@@ -51,11 +87,26 @@ fn mmio(phys: u64, len: u64) -> u64 {
     pmm::phys_to_virt(PhysAddr::new(phys)).as_u64()
 }
 
+/// `IA32_APIC_BASE`: bit 8 "is bootstrap processor", bit 10 "APIC global
+/// enable". The MP startup procedure has every application processor enable
+/// its own local APIC here; a processor whose APIC is not enabled receives no
+/// interrupts at all, IPIs included.
+const IA32_APIC_BASE: u32 = 0x1B;
+const APIC_BASE_ENABLE: u64 = 1 << 10;
+const APIC_BASE_BSP: u64 = 1 << 8;
+
 /// Software-enable the calling CPU's local APIC with the timer masked.
+///
+/// The IPI vector has to be unmasked explicitly: an LVT entry that was never
+/// written is masked, and a masked vector drops the interrupt instead of
+/// delivering it — which would make every TLB shootdown silently do nothing.
 pub fn enable_local() {
+    let _ = (APIC_BASE_ENABLE, APIC_BASE_BSP, IA32_APIC_BASE);
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR as u32);
     lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+    let ipi_vector = super::ipi::IPI_VECTOR as u32;
+    lapic_write(LAPIC_LVT_BASE + 8 * ipi_vector, LVT_FIXED | ipi_vector);
 }
 
 /// Map the BSP's local APIC and calibrate its timer against the PIT.
