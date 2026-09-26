@@ -25,6 +25,13 @@ pub fn phys_to_virt(p: PhysAddr) -> VirtAddr {
     VirtAddr::new(p.as_u64() + hhdm())
 }
 
+/// Bootloader-reclaimable regions, copied out of Limine's memory map so the
+/// map itself can be freed. Limine reports a handful of regions at most.
+const MAX_RECLAIM: usize = 16;
+static mut RECLAIM: [(u64, u64); MAX_RECLAIM] = [(0, 0); MAX_RECLAIM];
+static mut RECLAIM_N: usize = 0;
+static mut RECLAIMED: bool = false;
+
 struct Bitmap {
     bits: &'static mut [u64],
     frames: usize,
@@ -67,21 +74,34 @@ impl Bitmap {
         None
     }
 
+    /// `count` adjacent free frames, found a word at a time: a fully used word
+    /// is skipped in one step, so a large map costs `frames / 64` iterations
+    /// rather than `frames`.
     fn alloc_contiguous(&mut self, count: usize) -> Option<usize> {
-        let mut run = 0;
-        for i in 0..self.frames {
-            if self.is_used(i) {
-                run = 0;
-                continue;
-            }
-            run += 1;
-            if run == count {
-                let first = i + 1 - count;
-                for j in first..=i {
-                    self.set_used(j);
+        if count == 0 || count > self.frames {
+            return None;
+        }
+        let mut run = 0usize;
+        let mut start = 0usize;
+        for w in 0..self.bits.len() {
+            let mut free = !self.bits[w];
+            while free != 0 {
+                let idx = w * 64 + free.trailing_zeros() as usize;
+                if idx >= self.frames {
+                    return None;
                 }
-                self.free -= count;
-                return Some(first);
+                if run == 0 {
+                    start = idx;
+                }
+                run += 1;
+                if run == count {
+                    for j in start..=idx {
+                        self.set_used(j);
+                    }
+                    self.free -= count;
+                    return Some(start);
+                }
+                free &= free - 1;
             }
         }
         None
@@ -118,22 +138,42 @@ pub fn stats() -> Stats {
 pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
     unsafe { *addr_of_mut!(HHDM_OFFSET) = hhdm_offset };
 
+    // The bitmap has to reach the highest address we may ever free, which
+    // includes the bootloader's structures: they usually sit above RAM, and
+    // leaving them out would mean never giving that memory back.
+    let mut usable_end = 0u64;
     let mut highest = 0u64;
     let mut usable_frames = 0usize;
     let mut largest: Option<&Entry> = None;
     for e in entries {
         if e.type_ == MEMMAP_USABLE {
-            highest = highest.max(e.base + e.length);
+            usable_end = usable_end.max(e.base + e.length);
             usable_frames += (e.length / FRAME_SIZE) as usize;
             if largest.is_none_or(|l| e.length > l.length) {
                 largest = Some(e);
             }
         }
+        if e.type_ == MEMMAP_USABLE || e.type_ == MEMMAP_BOOTLOADER_RECLAIMABLE {
+            highest = highest.max(e.base + e.length);
+        }
     }
-    let frames = (highest / FRAME_SIZE) as usize;
-    let words = frames.div_ceil(64);
-    let bitmap_bytes = words * 8;
     let largest = largest.expect("no usable memory");
+    // Never spend more than an eighth of the largest usable region on the map.
+    let budget = (largest.length / 8) as usize;
+    let mut frames = (highest / FRAME_SIZE) as usize;
+    let mut words = frames.div_ceil(64);
+    let mut bitmap_bytes = words * 8;
+    if bitmap_bytes > budget {
+        frames = (usable_end / FRAME_SIZE) as usize;
+        words = frames.div_ceil(64);
+        bitmap_bytes = words * 8;
+        klog!(
+            "pmm",
+            "memory map would need {} KiB, over the {} KiB budget: bootloader memory above RAM is kept",
+            (highest / FRAME_SIZE).div_ceil(64) as u64 * 8 / 1024,
+            budget / 1024
+        );
+    }
     assert!(
         largest.length as usize >= bitmap_bytes,
         "largest region too small for bitmap"
@@ -171,15 +211,35 @@ pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
     }
     bm.free -= bm_frames;
 
-    let reclaimable: u64 = entries
+    // Remember the reclaimable regions: after `reclaim_bootloader` the memory
+    // map itself is gone, and so is every response hanging off it.
+    let mut reclaimable = 0u64;
+    let mut n = 0usize;
+    for e in entries
         .iter()
         .filter(|e| e.type_ == MEMMAP_BOOTLOADER_RECLAIMABLE)
-        .map(|e| e.length)
-        .sum();
+    {
+        reclaimable += e.length;
+        if n < MAX_RECLAIM {
+            unsafe {
+                let slot = core::ptr::addr_of_mut!(RECLAIM[n]);
+                (*slot).0 = e.base;
+                (*slot).1 = e.length;
+            }
+            n += 1;
+        } else {
+            klog!(
+                "pmm",
+                "more reclaimable regions than we track; {} KiB kept",
+                e.length / 1024
+            );
+        }
+    }
+    unsafe { RECLAIM_N = n };
 
     klog!(
         "pmm",
-        "{} MiB usable in {} regions, bitmap {} KiB, {} KiB bootloader-reclaimable (kept)",
+        "{} MiB usable in {} regions, bitmap {} KiB, {} KiB bootloader-reclaimable",
         usable_frames * 4 / 1024,
         entries.iter().filter(|e| e.type_ == MEMMAP_USABLE).count(),
         bitmap_bytes / 1024,
@@ -187,6 +247,57 @@ pub fn init(hhdm_offset: u64, entries: &[&Entry]) {
     );
 
     interrupts::without_interrupts(|| *PMM.lock() = Some(bm));
+}
+
+/// Give the bootloader's memory back to the allocator.
+///
+/// Only safe once boot is finished with Limine: the command line is copied by
+/// [`crate::boot::init`], the ACPI tables are parsed into owned structures, the
+/// framebuffer console copied its geometry, and the application processors have
+/// been released. One caveat is documented on [`reclaim_bootloader_unsafe`]:
+/// the HHDM aliases of the ACPI tables are left in place.
+pub fn reclaim_bootloader() -> u64 {
+    if unsafe { RECLAIMED } {
+        return 0;
+    }
+    let mut freed = 0u64;
+    let n = unsafe { RECLAIM_N };
+    for i in 0..n {
+        let (base, length) = unsafe { RECLAIM[i] };
+        let first = (base / FRAME_SIZE) as usize;
+        let count = (length / FRAME_SIZE) as usize;
+        let mut freed_here = 0u64;
+        interrupts::without_interrupts(|| {
+            if let Some(bm) = PMM.lock().as_mut() {
+                // The reclaimable range can reach past the last usable frame
+                // (Limine keeps structures above RAM), so stop at the end of
+                // the map rather than trusting the entry.
+                for j in first..(first + count).min(bm.frames) {
+                    // These frames start out marked used: they are not part of
+                    // any usable region, so nothing of ours can be in there.
+                    if bm.is_used(j) {
+                        bm.set_free(j);
+                        bm.free += 1;
+                        freed_here += FRAME_SIZE;
+                    }
+                }
+            }
+        });
+        freed += freed_here;
+    }
+    unsafe { RECLAIMED = true };
+    klog!(
+        "pmm",
+        "reclaimed {} KiB of bootloader memory ({} region(s))",
+        freed / 1024,
+        n
+    );
+    freed
+}
+
+/// Whether the bootloader's memory has been handed back yet.
+pub fn bootloader_reclaimed() -> bool {
+    unsafe { RECLAIMED }
 }
 
 pub fn alloc_frame() -> Option<PhysFrame> {

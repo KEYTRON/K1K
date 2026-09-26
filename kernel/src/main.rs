@@ -33,6 +33,7 @@ unsafe extern "C" fn kmain() -> ! {
     println!("  K1K  v{}  --  K1 Kernel (x86_64)", VERSION);
     println!("  ==================================");
 
+    boot::init();
     if !boot::BASE_REVISION.is_supported() {
         klog!(
             "boot",
@@ -135,6 +136,11 @@ unsafe extern "C" fn kmain() -> ! {
     service::init_builtin();
     service::start_all();
 
+    // Boot is done with Limine: the command line is our own copy, ACPI was
+    // parsed into owned structures, the framebuffer console copied its
+    // geometry and the application processors are up. Hand the rest back.
+    mm::pmm::reclaim_bootloader();
+
     // `autotest` runs the services and exits; `autotest=<seconds>` says for how
     // long, which is what the soak test uses.
     let autotest = boot::cmdline_has("autotest") || boot::cmdline_value("autotest").is_some();
@@ -190,7 +196,12 @@ unsafe extern "C" fn kmain() -> ! {
     if !smp_ok {
         klog!("k1k", "FAIL: application processors never ran a task");
     }
-    if flaky_restarts >= 2 && smp_ok {
+    // The kernel reads its command line after the bootloader's memory is gone,
+    // so a working autotest here also means the copy held up.
+    if !mm::pmm::bootloader_reclaimed() {
+        klog!("k1k", "FAIL: bootloader memory was never reclaimed");
+    }
+    if flaky_restarts >= 2 && smp_ok && mm::pmm::bootloader_reclaimed() {
         klog!(
             "k1k",
             "autotest passed: ring 3 + capabilities + self-healing supervisor on {} cpu(s)",
