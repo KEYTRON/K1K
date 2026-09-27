@@ -183,11 +183,12 @@ unsafe extern "C" fn kmain() -> ! {
         );
     }
     let deadline = arch::x86_64::interrupts::uptime_ms() + autotest_ms;
-    loop {
-        x86_64::instructions::hlt();
-        if autotest && arch::x86_64::interrupts::uptime_ms() >= deadline {
-            break;
-        }
+    // Sleeping rather than `hlt`: this code runs on the boot processor's default
+    // context, which is only scheduled when that CPU has nothing else to do — and
+    // on a machine where it has just started six services, that is not soon. A
+    // sleeper is woken by the tick whatever else is running.
+    while autotest && arch::x86_64::interrupts::uptime_ms() < deadline {
+        sched::sleep_ms(20);
     }
 
     klog!(
@@ -203,8 +204,11 @@ unsafe extern "C" fn kmain() -> ! {
     // a mistake here.
     {
         let before = mm::heap::stats();
+        // More than the window that was mapped before the other CPUs started, so
+        // the heap has to grow for real.
+        let boxes = before.region_bytes / 4096 + 2048;
         let mut v: alloc::vec::Vec<alloc::boxed::Box<[u8; 4096]>> = alloc::vec::Vec::new();
-        for i in 0..2048u32 {
+        for i in 0..boxes as u32 {
             v.push(alloc::boxed::Box::new([(i % 251) as u8; 4096]));
         }
         let mut sum = 0u64;
@@ -214,20 +218,23 @@ unsafe extern "C" fn kmain() -> ! {
         let grew = mm::heap::stats();
         klog!(
             "heap",
-            "grew with {} cpu(s) up: {} KiB -> {} KiB in {} region(s), sum {}",
+            "grew with {} cpu(s) up: {} KiB -> {} KiB in {} region(s) for {} MiB of boxes, sum {}",
             arch::x86_64::percpu::count(),
             before.region_bytes / 1024,
             grew.region_bytes / 1024,
             grew.regions,
+            boxes * 4 / 1024,
             sum
         );
         assert!(
             grew.region_bytes > before.region_bytes,
-            "the heap did not grow when 8 MiB was asked for"
+            "the heap did not grow when {} MiB was asked for",
+            boxes * 4 / 1024
         );
+        let last = v.len() - 1;
         assert_eq!(
-            v[2047][0],
-            (2047 % 251) as u8,
+            v[last][0],
+            (last as u32 % 251) as u8,
             "heap corrupted a block it handed out"
         );
         drop(v);

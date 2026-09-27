@@ -97,6 +97,11 @@ impl FrameSupply {
 }
 
 impl Supply for FrameSupply {
+    fn reserve(&mut self, bytes: usize) {
+        self.top += bytes;
+        self.mapped += bytes;
+    }
+
     fn supply(&mut self, want: usize) -> Option<Region> {
         if HEAP_READY.load(Ordering::Acquire) == 0 {
             return None;
@@ -216,8 +221,49 @@ pub fn stats() -> k1k_alloc::Stats {
     HEAP.with(|h| h.stats())
 }
 
+/// How much of the window is mapped before any other CPU is running.
+///
+/// Growing the heap installs new page-table levels, and a page-table change is
+/// only visible to the other CPUs after a TLB shootdown — which cannot be sent
+/// from inside the allocator, where interrupts are off and an IPI would never be
+/// acknowledged. So the part of the window that the kernel is going to need
+/// while it is still single-CPU is mapped here, and the CPUs come up onto a heap
+/// that has room. Everything after this point grows with the flush the allocator
+/// wrapper sends once interrupts are back on.
+const HEAP_AT_BOOT: usize = 16 * 1024 * 1024;
+
 pub fn init() {
     HEAP_READY.store(1, Ordering::Release);
+    // One CPU, interrupts off: nothing to announce, and nothing that could be
+    // looking at the kernel half of the page tables yet.
+    let pages = HEAP_AT_BOOT / pmm::FRAME_SIZE as usize;
+    let mapped = vmm::map_kernel_pages_deferred(
+        VirtAddr::new(HEAP_START),
+        pages,
+        Flags::WRITABLE | Flags::NO_EXECUTE,
+    );
+    if let Err(e) = mapped {
+        klog!(
+            "heap",
+            "could not map the first {} MiB: {e:?}",
+            HEAP_AT_BOOT / 1024 / 1024
+        );
+    } else {
+        // One CPU so far, so there is nothing to tell: the kernel half of the
+        // page tables is not shared with anybody yet.
+        vmm::flush_shared_range(
+            VirtAddr::new(HEAP_START),
+            VirtAddr::new(HEAP_START + HEAP_AT_BOOT as u64),
+        );
+        HEAP.with(|h| {
+            if h.add_region(k1k_alloc::Region {
+                base: HEAP_START as usize,
+                len: HEAP_AT_BOOT,
+            }) {
+                h.reserve_supply(HEAP_AT_BOOT);
+            }
+        });
+    }
     klog!(
         "heap",
         "window at {:#x}, up to {} MiB, {} KiB per growth",

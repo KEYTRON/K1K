@@ -45,6 +45,11 @@ pub trait Supply {
     /// heap exists.
     fn supply(&mut self, want: usize) -> Option<Region>;
 
+    /// Tell the supplier that the first `bytes` of what it hands out are already
+    /// there, so one that fills a window from the bottom can start above them.
+    /// A supplier with no window of its own ignores this.
+    fn reserve(&mut self, _bytes: usize) {}
+
     /// How many regions this supplier has handed over. Used by the tests to
     /// check that growth actually happened.
     fn supplied(&self) -> usize {
@@ -284,6 +289,13 @@ impl<S: Supply> Heap<S> {
             }
         }
         n
+    }
+
+    /// Hand out the first `bytes` of the supplier's own memory straight away, by
+    /// adding them as a region. What the kernel does for the part of the window
+    /// it maps before anything else can run.
+    pub fn reserve_supply(&mut self, bytes: usize) {
+        self.supply.reserve(bytes);
     }
 
     /// The regions handed to this heap so far.
