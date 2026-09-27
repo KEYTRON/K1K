@@ -143,7 +143,7 @@ impl Notify {
                 // the supervisor — so a candidate is only woken if it is still
                 // waiting. Its slot in the queue goes away with it.
                 let waiting =
-                    sched::with_task(id, |t| t.state == crate::sched::task::State::Blocked)
+                    sched::with_task(id, |t| t.state() == crate::sched::task::State::Blocked)
                         .unwrap_or(false);
                 if waiting {
                     wake.push(id);

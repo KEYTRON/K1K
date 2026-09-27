@@ -89,7 +89,10 @@ unsafe extern "C" fn ap_entry(info: &MpInfo) -> ! {
     );
     APS_ONLINE.fetch_add(1, Ordering::AcqRel);
     interrupts::enable();
+    // Halting forever would leave this CPU out of the scheduler entirely: it
+    // would never see work handed to it, and its own run queue would be dead
+    // weight. The idle wait is where a CPU with nothing to do picks work up.
     loop {
-        x86_64::instructions::hlt();
+        sched::idle_wait();
     }
 }

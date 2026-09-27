@@ -40,7 +40,7 @@ use super::vmm::{self, Flags};
 use crate::klog;
 
 /// Start of the heap window. Everything the kernel heap ever uses lives here.
-const HEAP_START: u64 = vmm::KERNEL_HEAP_START;
+pub const HEAP_START: u64 = vmm::KERNEL_HEAP_START;
 
 /// How much address space the heap may grow into. It is only a limit: pages
 /// come out of the PMM as they are needed, so a kernel that allocates a

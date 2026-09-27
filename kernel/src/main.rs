@@ -36,7 +36,7 @@ fn spin_a_little() {
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     arch::x86_64::early_init();
     console::init_framebuffer();
 

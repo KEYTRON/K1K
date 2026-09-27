@@ -114,7 +114,10 @@ fn broadcast_and_wait(req: Request) -> bool {
 /// The IPI entry point: do whatever this CPU was asked to do.
 pub fn on_ipi() {
     let pc = percpu::get();
-    let pending = pc.ipi_slot.lock().take();
+    // The slot is written by the sender with its own interrupts off, and read
+    // here with the reader's: a lock held across an interrupt on the same CPU
+    // would wait for itself.
+    let pending = interrupts::without_interrupts(|| pc.ipi_slot.lock().take());
     match pending {
         Some(Pending {
             seq,
@@ -136,9 +139,12 @@ pub fn on_ipi() {
         }) => {
             pc.resched.store(true, Ordering::Release);
             pc.ipi_done.store(seq, Ordering::Release);
-            // Leaving through the scheduler is what a timer tick does, so it is
-            // safe wherever we were interrupted.
-            crate::sched::schedule();
+            // Only where returning is an ordinary `ret`; see
+            // `sched::may_switch_here`. Otherwise the request waits for this CPU's
+            // next syscall, which is where it is acted on.
+            if crate::sched::may_switch_here() {
+                crate::sched::schedule();
+            }
         }
         Some(Pending {
             seq,

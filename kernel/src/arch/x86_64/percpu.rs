@@ -31,8 +31,23 @@ pub struct PerCpu {
     pub lapic_id: u32,
     pub current: TaskId,
     pub idle_task: TaskId,
+    /// The running task, as a pointer, so the scheduler's hot path never has to
+    /// look a task up in the table behind a lock.
+    pub current_task: *mut crate::sched::task::Task,
     /// Task we just switched away from; `sched::finish_switch` requeues it.
     pub prev_pending: TaskId,
+    /// That same task as a pointer, handed to `sched::finish_switch` by the new
+    /// task before it runs a single instruction.
+    pub prev_task: *mut crate::sched::task::Task,
+    /// This CPU's fallback context, used when nothing is runnable anywhere.
+    pub idle_ptr: *mut crate::sched::task::Task,
+    /// Tasks waiting for a deadline to pass, with the tick they are due at.
+    pub sleepers: spin::Mutex<alloc::vec::Vec<(TaskId, u64)>>,
+    /// Where the next steal attempt starts, so two CPUs do not both try the same
+    /// empty queue.
+    pub steal_cursor: u32,
+    /// How many times work was taken off another CPU's queue.
+    pub steals: u64,
     pub switches: u64,
     pub tss: *mut TaskStateSegment,
     /// Work handed to this CPU by an IPI; see [`super::ipi`].
@@ -42,6 +57,15 @@ pub struct PerCpu {
     pub ipi_done: AtomicU32,
     /// Set when a reschedule request arrives, cleared when it is acted on.
     pub resched: AtomicBool,
+    /// Set while a trap is being handled that was taken from ring 3.
+    ///
+    /// A task interrupted in user code cannot be suspended from inside the trap
+    /// and resumed by the context switch: the switch saves a stack pointer into
+    /// the middle of the trap's frame, and the `ret` that ends the switch would
+    /// jump to the trap stub's saved frame pointer instead of a return address.
+    /// The scheduler checks this and leaves such a task alone until it is back in
+    /// ordinary kernel code, where returning is a normal `ret`.
+    pub in_user_trap: bool,
     /// TSC reading taken on the same tick as every other CPU's, and the tick it
     /// was taken on. Two CPUs that read the counter seconds apart in real time
     /// must still agree once the readings are converted back, which is what
@@ -72,13 +96,20 @@ impl PerCpu {
             lapic_id: 0,
             current: NO_TASK,
             idle_task: NO_TASK,
+            current_task: core::ptr::null_mut(),
             prev_pending: NO_TASK,
+            prev_task: core::ptr::null_mut(),
+            idle_ptr: core::ptr::null_mut(),
+            sleepers: spin::Mutex::new(alloc::vec::Vec::new()),
+            steal_cursor: 0,
+            steals: 0,
             switches: 0,
             tss: core::ptr::null_mut(),
             ipi_slot: spin::Mutex::new(None),
             ipi_seq: AtomicU32::new(0),
             ipi_done: AtomicU32::new(0),
             resched: AtomicBool::new(false),
+            in_user_trap: false,
             tsc_sample: AtomicU64::new(0),
             tsc_aux: AtomicU32::new(u32::MAX),
         }

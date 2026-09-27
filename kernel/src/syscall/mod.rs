@@ -684,6 +684,14 @@ fn sys_info(buf: u64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    // A tick or a reschedule request that arrived while this task was in user
+    // code waits for a point where switching is a normal return, and a syscall
+    // handler is exactly that. Acting on it here costs nothing when nothing is
+    // waiting: the flag is only set when the quantum ran out or somebody asked
+    // this CPU to look at its run queue.
+    if sched::take_deferred_resched() {
+        sched::yield_now();
+    }
     match nr {
         SYS_LOG => sys_log(a0, a1),
         SYS_EXIT => sched::exit_current(a0 as i64),

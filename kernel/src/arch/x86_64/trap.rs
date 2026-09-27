@@ -86,6 +86,9 @@ const EXCEPTION_NAMES: [&str; 32] = [
 #[unsafe(no_mangle)]
 extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     let vector = frame.vector as u8;
+    // Ring 3 is the low two bits of the code selector. The scheduler needs to
+    // know: see `PerCpu::in_user_trap`.
+    percpu::get().in_user_trap = frame.cs & 3 != 0;
     match vector {
         0..=31 => exception(frame),
         idt::IRQ_TIMER => interrupts::on_timer(),

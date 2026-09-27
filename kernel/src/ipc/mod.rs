@@ -86,7 +86,7 @@ impl Endpoint {
             while let Some(rx) = inner.receivers.pop_front() {
                 let msg = pending.take().unwrap();
                 let leftover = sched::with_task(rx, |t| {
-                    if t.state == sched::task::State::Blocked {
+                    if t.state() == sched::task::State::Blocked {
                         t.ipc_inbox = Some(msg);
                         None
                     } else {
