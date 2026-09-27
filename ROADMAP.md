@@ -61,15 +61,11 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   from another task needs `Control`, checked before the task is looked up
 - [ ] A scheduler without a single global lock: per-CPU run queues with work
   stealing and per-CPU sleeper lists, keeping the task table for the slow paths
-  only. Attempted in `~/git/K1K-notes/sched-percpu-runqueues.WIP.rs`; the run
-  queue, the stealing, the sleeper lists, the switch handoff and the atomic task
-  state are written there, but the boot still hung and the tree was left at a
-  green commit rather than half-finished. Not kept: the per-CPU fields in
-  `percpu.rs` and the two call sites in `smp.rs`/`main.rs`, so the next attempt
-  starts from the scheduling logic in that file. The suspected cause of the hang
-  is a task becoming runnable twice at once — queued *and* already being a CPU's
-  idle pointer — which a per-task "already queued" assertion would pin down
-  before any more rewriting
+  only. The scheduling logic is written and the boot now gets as far as the end
+  of the autotest; what is left is one context switch that resumes a task with
+  a `ctx_sp` that points into a `Task` struct instead of a stack frame. It is
+  not committed: the tree stays green instead. Everything known about it is in
+  `~/git/K1K-notes/sched-findings.md` and `~/git/K1K-notes/sched-percpu-runqueues.WIP.patch`
 - [x] Returning the bootloader's memory to the PMM
 - [x] A growing kernel heap: a 1 GiB window that starts unmapped and takes
   mebibytes from the PMM as they are needed, announcing the new pages to the
