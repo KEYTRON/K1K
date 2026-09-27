@@ -144,10 +144,21 @@ unsafe extern "C" fn kmain() -> ! {
         kthread_ipc_server,
         alloc::sync::Arc::into_raw(ep.clone()) as u64,
     );
-    sched::spawn_kernel(
+    sched::spawn_kernel_with(
         "ipc-client",
         kthread_ipc_client,
         alloc::sync::Arc::into_raw(ep) as u64,
+        // The client keeps a memory object of its own, so that exiting it has
+        // something to give back: a thread that exits holding nothing proves
+        // nothing about tearing a task down.
+        |t| {
+            if let Some(mem) = obj::MemoryObject::new(1) {
+                let _ = t.caps.insert(obj::Capability {
+                    object: obj::Object::Memory(mem),
+                    rights: obj::Rights::MAP_READ.union(obj::Rights::GRANT),
+                });
+            }
+        },
     );
 
     let sup = sched::spawn_kernel("supervisor", service::supervisor_main, 0);
@@ -230,6 +241,26 @@ unsafe extern "C" fn kmain() -> ! {
             back.in_use / 1024,
             before.in_use / 1024
         );
+    }
+
+    {
+        // Withdraw a capability out of a running service, the way a supervisor
+        // would, and watch the accounting say so. The `notify` service is done
+        // with slot 1 by now, so nothing is about to be surprised by it.
+        if let Some(task) = service::task_of("notify") {
+            match syscall::revoke_cap(task, 1) {
+                Ok(()) => klog!(
+                    "cap",
+                    "revoked a capability slot of task {} ({task})",
+                    service::task_of("notify").unwrap_or(task)
+                ),
+                Err(e) => klog!("cap", "revoking task {task}'s slot 1 failed: {e}"),
+            }
+            let taken = syscall::revoke_all(task);
+            let left = sched::with_task(task, |t| t.caps.live_slots()).unwrap_or(0);
+            klog!("cap", "withdrew {taken} more slot(s) from task {task}");
+            assert_eq!(left, 0, "task {task} still holds {left} capability slot(s)");
+        }
     }
 
     {

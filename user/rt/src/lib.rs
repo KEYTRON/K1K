@@ -119,6 +119,7 @@ pub mod sys {
     pub const NOTIFY_WAIT: u64 = 24;
     pub const NOTIFY_SIGNAL: u64 = 25;
     pub const TIME: u64 = 26;
+    pub const CAP_REVOKE: u64 = 27;
 }
 
 /// Maximum capabilities one `spawn` can hand over.
@@ -223,6 +224,16 @@ pub fn exit(code: i64) -> ! {
 
 pub fn yield_now() {
     syscall(sys::YIELD, 0, 0, 0, 0);
+}
+
+/// Take a capability back, yours or another task's.
+///
+/// Revoking your own needs no authority. Revoking another task's needs `Control`
+/// — the same authority that spawns services. The slot is dead afterwards: it
+/// never names anything again, so a program that kept the number cannot find a
+/// different object in its place.
+pub fn cap_revoke(task: u32, slot: Cap) -> Result<()> {
+    check(syscall(sys::CAP_REVOKE, task as u64, slot.0 as u64, 0, 0)).map(|_| ())
 }
 
 /// Nanoseconds since boot, monotonic on every core.
@@ -475,7 +486,8 @@ impl Grant {
     }
 }
 
-/// Start a supervised service with capabilities and launch arguments.
+/// Start a supervised service with capabilities and launch arguments, and
+/// return its task id.
 ///
 /// `grants` become the new task's capability slots 0..n in order, each reduced
 /// to the rights given here (never more than the spawner holds). `args` is a
@@ -508,7 +520,79 @@ pub fn spawn_with(
         desc[8 + i * 2] = g.cap.0 as u64;
         desc[9 + i * 2] = g.rights as u64;
     }
-    check(syscall(sys::SPAWN_DESC, desc.as_mut_ptr() as u64, 0, 0, 0)).map(|id| id as u32)
+    let id = check(syscall(sys::SPAWN_DESC, desc.as_mut_ptr() as u64, 0, 0, 0))? as u32;
+    Ok(id)
+}
+
+/// Where the capabilities a spawn handed over ended up.
+///
+/// The new task's table is the kernel's business, not the spawner's, so the
+/// kernel writes this back: the task id and the slot number of each grant, in
+/// the order they were listed. Without it a grantor knows it gave something away
+/// and not what to ask for when it wants it back — see [`cap_revoke`].
+#[derive(Debug, Clone, Copy)]
+pub struct Receipt {
+    pub task: u32,
+    pub slots: [Cap; MAX_SPAWN_GRANTS],
+}
+
+impl Receipt {
+    /// The slot holding the `n`th grant, or `None` if the kernel did not say.
+    pub fn slot(&self, n: usize) -> Option<Cap> {
+        match self.slots.get(n) {
+            Some(cap) if cap.0 != u32::MAX => Some(*cap),
+            _ => None,
+        }
+    }
+}
+
+/// [`spawn_with`], and learn where the grants landed.
+pub fn spawn_with_receipt(
+    control: Cap,
+    image: Cap,
+    size: usize,
+    name: &str,
+    grants: &[Grant],
+    args: &str,
+) -> Result<Receipt> {
+    let name = &name.as_bytes()[..name.len().min(32)];
+    if grants.len() > MAX_SPAWN_GRANTS || args.len() > MAX_SPAWN_ARGS {
+        return Err(Error::Inval);
+    }
+    let mut desc = [0u64; 8 + 2 * MAX_SPAWN_GRANTS];
+    desc[0] = control.0 as u64;
+    desc[1] = image.0 as u64;
+    desc[2] = size as u64;
+    desc[3] = name.as_ptr() as u64;
+    desc[4] = name.len() as u64;
+    desc[5] = grants.len() as u64;
+    desc[6] = args.as_ptr() as u64;
+    desc[7] = args.len() as u64;
+    for (i, g) in grants.iter().enumerate() {
+        desc[8 + i * 2] = g.cap.0 as u64;
+        desc[9 + i * 2] = g.rights as u64;
+    }
+    let mut receipt = [u64::MAX; 1 + MAX_SPAWN_GRANTS];
+    let id = check(syscall(
+        sys::SPAWN_DESC,
+        desc.as_mut_ptr() as u64,
+        receipt.as_mut_ptr() as u64,
+        0,
+        0,
+    ))? as u32;
+    if receipt[0] != u64::MAX {
+        // The kernel knows the task id better than we do; trust its answer.
+        debug_assert_eq!(receipt[0], id as u64, "receipt names a different task");
+    }
+    let mut slots = [Cap(u32::MAX); MAX_SPAWN_GRANTS];
+    for (i, w) in receipt[1..].iter().enumerate() {
+        slots[i] = if *w == u64::MAX {
+            Cap(u32::MAX)
+        } else {
+            Cap(*w as u32)
+        };
+    }
+    Ok(Receipt { task: id, slots })
 }
 
 #[derive(Debug, Clone, Copy, Default)]

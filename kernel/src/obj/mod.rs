@@ -177,8 +177,16 @@ impl Capability {
     }
 }
 
+/// A task's capabilities.
+///
+/// A revoked slot stays revoked. The capability is gone — the object may live on
+/// in somebody else's table — but the *slot* is not handed out again, because a
+/// program that kept the old slot number would otherwise find its next call
+/// quietly reaching a different object. A tombstone is the honest answer: the
+/// authority is gone for good, and the number that named it is dead.
 pub struct CapTable {
     slots: Vec<Option<Capability>>,
+    revoked: Vec<bool>,
 }
 
 pub type CapSlot = u32;
@@ -187,11 +195,19 @@ const MAX_SLOTS: usize = 256;
 
 impl CapTable {
     pub const fn new() -> Self {
-        Self { slots: Vec::new() }
+        Self {
+            slots: Vec::new(),
+            revoked: Vec::new(),
+        }
+    }
+
+    /// The first slot that is free and has never been revoked.
+    fn first_usable(&self) -> Option<usize> {
+        (0..self.slots.len()).find(|i| self.slots[*i].is_none() && !self.revoked[*i])
     }
 
     pub fn insert(&mut self, cap: Capability) -> Option<CapSlot> {
-        if let Some(i) = self.slots.iter().position(Option::is_none) {
+        if let Some(i) = self.first_usable() {
             self.slots[i] = Some(cap);
             return Some(i as CapSlot);
         }
@@ -199,6 +215,7 @@ impl CapTable {
             return None;
         }
         self.slots.push(Some(cap));
+        self.revoked.push(false);
         Some((self.slots.len() - 1) as CapSlot)
     }
 
@@ -222,6 +239,72 @@ impl CapTable {
         })
     }
 
+    /// Whether any slot in the table carries `Control` authority.
+    pub fn has_control(&self) -> bool {
+        self.iter().any(|c| c.is_control())
+    }
+
+    /// Every live capability in the table, for iterating over it.
+    pub fn iter(&self) -> impl Iterator<Item = &Capability> {
+        self.slots.iter().filter_map(Option::as_ref)
+    }
+
+    /// Give a slot up for good. Returns what was in it, or `None` if the slot
+    /// was already empty or already revoked.
+    pub fn revoke(&mut self, slot: CapSlot) -> Option<Capability> {
+        let i = slot as usize;
+        if self.revoked.get(i).copied().unwrap_or(false) {
+            return None;
+        }
+        let cap = self.slots.get_mut(i)?.take()?;
+        if i < self.revoked.len() {
+            self.revoked[i] = true;
+        }
+        Some(cap)
+    }
+
+    /// The slot number of the `n`th capability in the table, counting from zero.
+    /// The spawner uses it to tell a grantor where its grants landed.
+    pub fn slot_at(&self, n: usize) -> Option<CapSlot> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_some())
+            .nth(n)
+            .map(|(i, _)| i as CapSlot)
+    }
+
+    /// How many slots the table has ever used, live or dead.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Slots that hold a capability.
+    pub fn live_slots(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// Slots that have been revoked and are dead for good.
+    pub fn revoked_slots(&self) -> usize {
+        self.revoked.iter().filter(|r| **r).count()
+    }
+
+    /// Slots that are free and have never been revoked, plus the ones left over
+    /// under the limit.
+    pub fn free_slots(&self) -> usize {
+        let used = self.slots.len();
+        let taken = self
+            .slots
+            .iter()
+            .zip(&self.revoked)
+            .filter(|(s, r)| s.is_none() && !**r)
+            .count();
+        (MAX_SLOTS - used).saturating_add(taken)
+    }
+
+    /// Give a slot up without revoking it: the number can be reused. This is
+    /// what `cap_drop` does, and the difference from [`CapTable::revoke`] is the
+    /// whole point of having both.
     pub fn remove(&mut self, slot: CapSlot) -> Option<Capability> {
         self.slots.get_mut(slot as usize)?.take()
     }

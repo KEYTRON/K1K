@@ -39,6 +39,7 @@ pub const SYS_NOTIFY_CREATE: u64 = 23;
 pub const SYS_NOTIFY_WAIT: u64 = 24;
 pub const SYS_NOTIFY_SIGNAL: u64 = 25;
 pub const SYS_TIME: u64 = 26;
+pub const SYS_CAP_REVOKE: u64 = 27;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -179,6 +180,56 @@ fn sys_recv(slot: u64, buf: u64) -> i64 {
     };
     match copy_to_user(buf, &words_to_bytes(&msg.words)) {
         Ok(()) => msg.sender as i64,
+        Err(e) => e,
+    }
+}
+
+/// Take a capability slot out of a task's table, whoever is asking.
+///
+/// The slot is a tombstone afterwards: the number never names anything again.
+/// The kernel uses this to strip a task it is about to release, and a task with
+/// `Control` uses it to withdraw what it delegated.
+pub fn revoke_cap(task: sched::task::TaskId, slot: u32) -> Result<(), i64> {
+    match sched::with_task(task, |t| t.caps.revoke(slot)) {
+        Some(Some(_)) => Ok(()),
+        _ => Err(EINVAL),
+    }
+}
+
+/// Take every capability out of a task's table, which is what tearing a task down
+/// has to mean: a task that is being released must not still be able to reach
+/// anything, however briefly it is still around to be asked.
+pub fn revoke_all(task: sched::task::TaskId) -> usize {
+    let mut n = 0;
+    while n <= 4096 {
+        let stepped = sched::with_task(task, |t| {
+            match (0..t.caps.slot_count()).find(|s| t.caps.get(*s as u32).is_some()) {
+                Some(s) => t.caps.revoke(s as u32).is_some(),
+                None => false,
+            }
+        });
+        match stepped {
+            Some(true) => n += 1,
+            _ => break,
+        }
+    }
+    n
+}
+
+/// A task may always revoke its own. Anything else needs the same authority that
+/// spawns services: the kernel has no parentage, only capability tables, so
+/// `Control` is what says "you may take authority back out of other tasks".
+///
+/// The authority is checked before the task is looked up, so the answer does not
+/// tell an unprivileged task which tasks exist.
+fn sys_cap_revoke(task: u64, slot: u64) -> i64 {
+    let me = sched::current_id();
+    let victim = task as u32;
+    if victim != me && !sched::with_current(|t| t.caps.has_control()) {
+        return EPERM;
+    }
+    match revoke_cap(victim, slot as u32) {
+        Ok(()) => 0,
         Err(e) => e,
     }
 }
@@ -337,7 +388,7 @@ fn sys_spawn(ctl_slot: u64, mem_slot: u64, size: u64, name: u64) -> i64 {
 /// more authority than the spawner holds (and needs `GRANT` to pass it on).
 /// The new task's capabilities are numbered in the order given, starting at
 /// slot 0, which is what the `caps=` launch argument reports to the service.
-fn sys_spawn_desc(desc: u64) -> i64 {
+fn sys_spawn_desc(desc: u64, receipt: u64) -> i64 {
     const WORDS: usize = 8;
     let Ok(head) = copy_from_user(desc, (WORDS * 8) as u64) else {
         return EFAULT;
@@ -390,11 +441,35 @@ fn sys_spawn_desc(desc: u64) -> i64 {
             Err(e) => return e,
         }
     };
-    match start_service(ctl_slot, mem_slot, size, name, &grants, &args) {
-        Ok(Some(id)) => id as i64,
-        Ok(None) => EINVAL,
-        Err(e) => e,
+    let started = match start_service(ctl_slot, mem_slot, size, name, &grants, &args) {
+        Ok(Some(id)) => id,
+        Ok(None) => return EINVAL,
+        Err(e) => return e,
+    };
+    // Hand back the slot numbers the new task's capabilities ended up in, so
+    // that the grantor can address them later — which is the difference between
+    // delegating authority and being able to withdraw it.
+    if receipt != 0 && !write_receipt(receipt, started, grants.len()) {
+        return EFAULT;
     }
+    started as i64
+}
+
+/// Tell the spawner which slots its grants ended up in.
+fn write_receipt(ptr: u64, task: u32, grants: usize) -> bool {
+    let mut words = [0u64; MAX_SPAWN_GRANTS as usize + 1];
+    words[0] = task as u64;
+    for (i, w) in words[1..=grants].iter_mut().enumerate() {
+        *w = sched::with_task(task, |t| {
+            // The grants are inserted in order into a fresh table, so the slots
+            // are consecutive from the first free one; asking the table is the
+            // only way to be sure of it.
+            t.caps.slot_at(i).map(|s| s as u64)
+        })
+        .flatten()
+        .unwrap_or(u64::MAX);
+    }
+    copy_to_user(ptr, &words_to_bytes(&words)).is_ok()
 }
 
 /// Validate the spawn authority, copy the image out of the caller's memory
@@ -633,6 +708,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_DEV_INFO => sys_dev_info(a0, a1),
         SYS_DEV_MAP => sys_dev_map(a0, a1),
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
+        SYS_CAP_REVOKE => sys_cap_revoke(a0, a1),
         SYS_TIME => {
             // The monotonic clock: what the tick counter cannot answer, since it
             // only advances in whole interrupts and only on the boot processor.
@@ -641,7 +717,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_NOTIFY_CREATE => sys_notify_create(),
         SYS_NOTIFY_WAIT => sys_notify_wait(a0, a1),
         SYS_NOTIFY_SIGNAL => sys_notify_signal(a0, a1),
-        SYS_SPAWN_DESC => sys_spawn_desc(a0),
+        SYS_SPAWN_DESC => sys_spawn_desc(a0, a1),
         SYS_IRQ_BIND => sys_irq_bind(a0, a1),
         SYS_IRQ_ACK => sys_irq_ack(a0),
         SYS_DEV_IRQ => sys_dev_irq(a0),

@@ -112,6 +112,9 @@ test: test-iso $(DISK)
 	test $$status -eq 33 \
 		&& grep -q 'fs\] mounted' $(BUILD)/serial.log \
 		&& grep -q 'notify\] notification semantics ok' $(BUILD)/serial.log \
+		&& grep -q 'revoke\] capability revocation ok' $(BUILD)/serial.log \
+		&& grep -q 'superv\] task [0-9]* lost [0-9]* capability slot' $(BUILD)/serial.log \
+		&& grep -q 'cap\] withdrew' $(BUILD)/serial.log \
 		&& grep -q 'kbd\] keyboard driver online (ring 3, IRQ 1 via notification)' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \

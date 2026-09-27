@@ -74,11 +74,27 @@ pub fn init() {
 }
 
 pub fn spawn_kernel(name: &'static str, entry: extern "C" fn(u64), arg: u64) -> TaskId {
+    spawn_kernel_with(name, entry, arg, |_| {})
+}
+
+/// [`spawn_kernel`], with the new task's capability table filled in first.
+///
+/// A kernel thread is not a service, so it has no capabilities unless somebody
+/// gives it one — but the ones that are handed something to talk through do get
+/// a real capability, and when such a thread exits the supervisor has to strip
+/// it, which is only worth testing if a thread ever holds one.
+pub fn spawn_kernel_with(
+    name: &'static str,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    caps: impl FnOnce(&mut Task),
+) -> TaskId {
     interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
         let id = s.next_id;
         s.next_id += 1;
-        let t = Task::new_kernel(id, name, entry, arg);
+        let mut t = Task::new_kernel(id, name, entry, arg);
+        caps(&mut t);
         s.tasks.insert(id, t);
         s.ready.push_back(id);
         id
@@ -297,7 +313,14 @@ pub extern "C" fn thread_exit_hook() -> ! {
 }
 
 /// Pop one dead task that has fully left its CPU, for the supervisor to free.
-pub fn take_dead() -> Option<Box<Task>> {
+/// Take the next dead task off the scheduler, with the number of capabilities
+/// it was holding.
+///
+/// A dead task's authority goes with it, and it is taken while the task is still
+/// reachable: a task that has exited but not been reaped yet is still something
+/// the hardware can be pointed at, and "it is dead" is not the same as "it can
+/// do nothing".
+pub fn take_dead() -> Option<(Box<Task>, usize)> {
     interrupts::without_interrupts(|| {
         let mut s = SCHED.lock();
         let pos = s
@@ -305,7 +328,19 @@ pub fn take_dead() -> Option<Box<Task>> {
             .iter()
             .position(|id| s.tasks.get(id).is_some_and(|t| t.on_cpu.is_none()))?;
         let id = s.reap.remove(pos)?;
-        s.tasks.remove(&id)
+        let mut taken = 0;
+        if let Some(t) = s.tasks.get_mut(&id) {
+            // Only the table is touched here, so this stays inside the lock it
+            // is already holding.
+            while let Some(slot) =
+                (0..t.caps.slot_count()).find(|s| t.caps.get(*s as u32).is_some())
+            {
+                if t.caps.revoke(slot as u32).is_some() {
+                    taken += 1;
+                }
+            }
+        }
+        s.tasks.remove(&id).map(|t| (t, taken))
     })
 }
 

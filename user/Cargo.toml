@@ -8,6 +8,7 @@ members = [
     "svc/pong",
     "svc/kbd",
     "svc/notify",
+    "svc/revoke",
     "svc/blk",
     "svc/fs",
 ]

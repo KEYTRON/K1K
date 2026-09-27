@@ -52,6 +52,46 @@ forwards it to the bound endpoint (if any) and acknowledges it. Vector layout:
 32 timer, 34..49 ISA IRQs 0..15, 64..127 MSI-X, 255 spurious. On the way out
 the stub swaps GS back for ring-3 frames and `iretq`s.
 
+## Revoking a capability
+
+Delegating a capability is a copy into another table; withdrawing it has to say
+*which* copy, and that is the part the model normally skips. Two things make it
+addressable:
+
+- `spawn_desc` can write a **receipt**: the new task's id and the slot number
+  each grant ended up in, in the order they were listed. The spawner knows what
+  it gave away and where; without that, a grantor that wants its authority back
+  has nothing to name.
+- `cap_revoke(task, slot)` takes it back. A task may always revoke its own;
+  anything else needs `Control` — the same authority that spawns services, since
+  the kernel has no parentage, only tables. The authority is checked *before* the
+  task is looked up, so an unprivileged caller cannot map the system by watching
+  which ids exist.
+
+A revoked slot is a **tombstone**, not a free slot. The capability is gone — the
+object itself may live on in somebody else's table — but the number is never
+handed out again, because a program that kept the old slot must not find some
+other object there next time. "The call failed" and "the call reached something
+else" are very different failures, and only one of them is safe. This is why
+`cap_drop` also exists: dropping gives a slot up *without* killing the number, for
+a program that is finished with a capability rather than finished with the
+number.
+
+Tearing a task down uses the same primitive. A task that has exited but has not
+been reaped is still something the hardware can be pointed at, so the supervisor
+strips its table before releasing it, and says how much it took:
+
+```
+[superv] task 6 lost 1 capability slot(s) on the way out
+```
+
+The supervisor's service table reports the same thing per service, because a
+table filling with tombstones is a service that will run out of numbers one day:
+
+```
+[superv]   notify   task=9    caps=0 live/253 free/3 revoked restarts=0 last_exit=None
+```
+
 ## Memory
 
 | Region | Address | Notes |
@@ -493,6 +533,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 24 | `notify_wait` | `slot, mode` (0 one, 1 poll, 2 all) | signals taken, `EAGAIN` from a poll, `EPERM`, `EINVAL` |
 | 25 | `notify_signal` | `slot, count` | waiters woken, `EPERM`, `EINVAL` |
 | 26 | `time` | — | nanoseconds since boot, monotonic on every core |
+| 27 | `cap_revoke` | `task, slot` | 0, `EPERM`, `EINVAL` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

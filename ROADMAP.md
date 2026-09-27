@@ -55,7 +55,10 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   every CPU's TSC reading is checked against every other. `make test-kvm` runs
   the autotest on the host's own TSC and HPET, which is the only place those
   paths can be trusted at all: TCG emulates neither
-- [ ] Capability revocation (the `SIGNAL`/`WAIT` split is the groundwork)
+- [x] Capability revocation: a spawner is told which slot each of its grants
+  landed in, `cap_revoke` takes it back, a revoked slot is a tombstone that is
+  never reused, and tearing a task down strips its table. Withdrawing authority
+  from another task needs `Control`, checked before the task is looked up
 - [ ] A scheduler without a single global lock
 - [x] Returning the bootloader's memory to the PMM
 - [x] A growing kernel heap: a 1 GiB window that starts unmapped and takes

@@ -83,6 +83,7 @@ static PING: &[u8] = image!("ping");
 static PONG: &[u8] = image!("pong");
 static KBD: &[u8] = image!("kbd");
 static NOTIFY: &[u8] = image!("notify");
+static REVOKE: &[u8] = image!("revoke");
 static BLK: &[u8] = image!("blk");
 static FS: &[u8] = image!("fs");
 
@@ -141,6 +142,19 @@ pub fn init_builtin() {
                 rights: Rights::WAIT,
             },
         ],
+        dynamic: false,
+        args: b"",
+    });
+
+    // Capability revocation: slot 0 is a notification to take back, which is
+    // all the semantics need.
+    register(ServiceSpec {
+        name: "revoke",
+        image: REVOKE,
+        grants: alloc::vec![Grant {
+            object: Object::Notify(Notify::new()),
+            rights: Rights::SIGNAL.union(Rights::WAIT),
+        }],
         dynamic: false,
         args: b"",
     });
@@ -409,11 +423,20 @@ pub extern "C" fn supervisor_main(_: u64) {
         sched::current_id()
     );
     loop {
-        while let Some(dead) = sched::take_dead() {
+        while let Some((dead, taken)) = sched::take_dead() {
             let name = dead.name;
             let code = dead.exit_code.unwrap_or(0);
             let svc = dead.service;
+            let id = dead.id;
             drop(dead);
+            if taken > 0 {
+                klog!(
+                    "superv",
+                    "task {} lost {} capability slot(s) on the way out",
+                    id,
+                    taken
+                );
+            }
 
             let Some(idx) = svc else {
                 klog!("superv", "reaped kernel thread '{}' (exit {})", name, code);
@@ -486,14 +509,44 @@ pub fn restarts_of(name: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// The task a named service is currently running as, if any.
+pub fn task_of(name: &str) -> Option<sched::task::TaskId> {
+    SERVICES
+        .lock()
+        .iter()
+        .find(|s| s.spec.name == name)
+        .and_then(|s| s.task)
+}
+
 pub fn dump() {
     let s = SERVICES.lock();
     for st in s.iter() {
+        // A service's capability table is the sum of what it was given and what
+        // it gave back. Revoked slots in particular are worth seeing: they are
+        // never reused, so a table filling with them is a service that will run
+        // out of numbers one day.
+        let (live, revoked, free, ctl) = st
+            .task
+            .and_then(|t| {
+                sched::with_task(t, |task| {
+                    (
+                        task.caps.live_slots(),
+                        task.caps.revoked_slots(),
+                        task.caps.free_slots(),
+                        task.caps.has_control(),
+                    )
+                })
+            })
+            .unwrap_or((0, 0, 0, false));
         klog!(
             "superv",
-            "  {:<8} task={:<4} restarts={} last_exit={:?}{}",
+            "  {:<8} task={:<4} caps={} live/{} free/{} revoked{} restarts={} last_exit={:?}{}",
             st.spec.name,
             st.task.map(|t| t as i64).unwrap_or(-1),
+            live,
+            free,
+            revoked,
+            if ctl { ", Control" } else { "" },
             st.restarts,
             st.last_exit,
             if st.spec.dynamic { " (from disk)" } else { "" }

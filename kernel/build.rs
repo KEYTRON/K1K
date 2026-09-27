@@ -7,7 +7,7 @@ use std::process::Command;
 
 /// Services embedded in the kernel image. `hello` and `flaky` are built by the
 /// same workspace but shipped on the disk image and loaded by `fs`.
-const SERVICES: &[&str] = &["ping", "pong", "kbd", "notify", "blk", "fs"];
+const SERVICES: &[&str] = &["ping", "pong", "kbd", "notify", "revoke", "blk", "fs"];
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

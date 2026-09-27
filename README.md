@@ -133,6 +133,12 @@ a FAT volume.
   before the counter is switched on), or the tick counter as the fallback — never
   assumed. `uptime_ms()` and the `time` syscall come from it, and the ping/pong
   round trip is timed with it.
+- Capability revocation: a spawner gets a receipt saying which slot each of its
+  grants landed in, `cap_revoke` takes one back, and the slot stays dead
+  afterwards — a revoked number never names a different object. A task may
+  always revoke its own; taking authority out of *another* task needs `Control`,
+  and the authority is checked before the task is looked up, so the answer does
+  not leak which tasks exist. Tearing a task down uses the same primitive.
 - Asynchronous notifications: a `Notify` object is a counter of things that
   happened with tasks waiting for the next one. A signal that arrives before the
   wait is still there afterwards, so a driver cannot miss an interrupt the way a
@@ -213,8 +219,8 @@ limine.conf       bootloader configuration
 - A file-service protocol (open/read over IPC) so spawned services can read
   files themselves; passing capabilities to spawned services; a service
   manifest on disk instead of "everything in /SVC".
-- Capability revocation; a scheduler without one global lock; WARP packages as
-  the way service binaries reach `/SVC`.
+- A scheduler without one global lock; WARP packages as the way service binaries
+  reach `/SVC`.
 
 ## License
 

@@ -68,3 +68,10 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "k1k-rt",
 ]
+
+[[package]]
+name = "revoke"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "k1k-rt",
+]
