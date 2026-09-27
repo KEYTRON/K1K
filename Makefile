@@ -2,7 +2,11 @@ MAKEFLAGS += -rR
 .SUFFIXES:
 
 PROFILE   ?= dev
-QEMUFLAGS ?= -m 512M -smp 4
+# `+invtsc` and `+rdtscp` are what the emulated TSC actually does — a fixed rate
+# and the same reading on every core — but the default CPU model does not
+# advertise them, and the kernel only trusts a clock the CPU vouches for. The
+# fallback (counting timer interrupts) is the one worth not testing by default.
+QEMUFLAGS ?= -m 512M -smp 4 -cpu qemu64,+invtsc,+rdtscp
 LIMINE     = third_party/limine
 BUILD      = build
 ISO        = $(BUILD)/k1k.iso
@@ -114,6 +118,28 @@ test: test-iso $(DISK)
 		&& grep -q 'fs\] serving files' $(BUILD)/serial.log \
 		&& grep -q 'hello\] /SVC holds' $(BUILD)/serial.log \
 		&& grep -q 'hello\] /README.TXT:' $(BUILD)/serial.log
+
+# The same autotest under KVM, where the machine is the host: the TSC is the
+# host's own, and the HPET is the chipset's real one. Two things have to be asked
+# for explicitly, because a filtered CPUID view hides both: `+invtsc` (the host
+# kernel does not promise an invariant TSC to its guests, whatever the hardware
+# does) and `+rdtscp` (without which there is no processor id to sample with).
+# TCG emulates neither faithfully — it refuses to claim an invariant TSC at all,
+# and its HPET answers every register with the same constant — so the paths that
+# matter are only exercised here. Skipped, not failed, where KVM is missing.
+test-kvm: test-iso $(DISK)
+	@if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then \
+		echo "kvm not available; skipping the hardware-clock test"; exit 0; \
+	fi; \
+	rm -f $(BUILD)/serial-kvm.log; \
+	timeout 90 qemu-system-x86_64 -M q35 -accel kvm -cpu host,+invtsc,+rdtscp \
+		-cdrom $(TEST_ISO) -boot d \
+		-display none -serial file:$(BUILD)/serial-kvm.log -no-reboot \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) -m 512M -smp 4; \
+	status=$$?; cat $(BUILD)/serial-kvm.log; echo "qemu exit: $$status"; \
+	test $$status -eq 33 \
+		&& grep -q 'clock\] TSC [0-9]* MHz' $(BUILD)/serial-kvm.log \
+		&& grep -q 'cpu(s) sampled the TSC' $(BUILD)/serial-kvm.log
 
 # The allocator behind both the kernel heap and the service heap is plain logic
 # over byte ranges, so it can be tested on the host: the harness keeps the

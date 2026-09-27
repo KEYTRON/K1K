@@ -2,7 +2,7 @@
 //! parse the MADT for Local APIC / I/O APIC / interrupt-override information.
 
 use alloc::vec::Vec;
-use spin::Once;
+use spin::{Mutex, Once};
 use x86_64::PhysAddr;
 
 use crate::klog;
@@ -33,6 +33,7 @@ pub struct Madt {
 }
 
 static MADT: Once<Madt> = Once::new();
+static HPET: Mutex<Option<HpetTable>> = Mutex::new(None);
 
 pub fn madt() -> &'static Madt {
     MADT.get().expect("acpi not initialised")
@@ -43,6 +44,10 @@ fn map(phys: u64, len: usize) -> &'static [u8] {
     vmm::map_phys_hhdm(PhysAddr::new(phys), len as u64);
     let va = crate::mm::pmm::phys_to_virt(PhysAddr::new(phys));
     unsafe { core::slice::from_raw_parts(va.as_ptr::<u8>(), len) }
+}
+
+fn u16_at(b: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([b[off], b[off + 1]])
 }
 
 fn u32_at(b: &[u8], off: usize) -> u32 {
@@ -91,6 +96,9 @@ pub fn init(rsdp_phys: u64) {
 
     let mut madt = Madt::default();
     let mut found = false;
+    // The HPET description table says where its register block is; the block
+    // itself is not at the table's address.
+    let mut hpet = None;
     for i in 0..(sdt.len() - 36) / entry_size {
         let off = 36 + i * entry_size;
         let addr = if entry_size == 8 {
@@ -104,6 +112,20 @@ pub fn init(rsdp_phys: u64) {
         if sig == b"APIC" {
             parse_madt(body, &mut madt);
             found = true;
+        } else if sig == b"HPET" && hpet.is_none() {
+            // The register block's physical address is the 64-bit field at
+            // offset 0x2C of the description table. Everything else the table
+            // says about the counter is a hint: what the counter actually ticks
+            // at is in its own capability register, and that is what the clock
+            // code reads.
+            let base = u64_at(body, 0x2C);
+            let period_fs = u16_at(body, 0x29) as u64;
+            klog!(
+                "acpi",
+                "HPET description table at {addr:#x}: registers at {base:#x}, {} fs/tick",
+                period_fs
+            );
+            hpet = Some(HpetTable { base, period_fs });
         }
     }
     assert!(found, "no MADT found");
@@ -122,6 +144,19 @@ pub fn init(rsdp_phys: u64) {
         }
     );
     MADT.call_once(|| madt);
+    *HPET.lock() = hpet;
+}
+
+/// What the firmware said about the HPET: where its registers are and what its
+/// counter ticks at.
+#[derive(Clone, Copy)]
+pub struct HpetTable {
+    pub base: u64,
+    pub period_fs: u64,
+}
+
+pub fn hpet() -> Option<HpetTable> {
+    *HPET.lock()
 }
 
 fn parse_madt(t: &[u8], out: &mut Madt) {

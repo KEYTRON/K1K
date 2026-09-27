@@ -38,6 +38,7 @@ pub const SYS_SPAWN_DESC: u64 = 22;
 pub const SYS_NOTIFY_CREATE: u64 = 23;
 pub const SYS_NOTIFY_WAIT: u64 = 24;
 pub const SYS_NOTIFY_SIGNAL: u64 = 25;
+pub const SYS_TIME: u64 = 26;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -632,6 +633,11 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_DEV_INFO => sys_dev_info(a0, a1),
         SYS_DEV_MAP => sys_dev_map(a0, a1),
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
+        SYS_TIME => {
+            // The monotonic clock: what the tick counter cannot answer, since it
+            // only advances in whole interrupts and only on the boot processor.
+            irq::uptime_ns() as i64
+        }
         SYS_NOTIFY_CREATE => sys_notify_create(),
         SYS_NOTIFY_WAIT => sys_notify_wait(a0, a1),
         SYS_NOTIFY_SIGNAL => sys_notify_signal(a0, a1),

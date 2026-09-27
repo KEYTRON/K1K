@@ -97,8 +97,10 @@ impl Notify {
 
     /// What the notification path has done: notifications created, signals
     /// recorded, signals taken, signals folded into an already-saturated
-    /// counter, and tasks blocked in a wait right now.
-    pub fn report() -> (usize, u64, u64, u64, usize) {
+    /// counter, tasks blocked in a wait right now, and signals nobody has taken
+    /// yet. A `pending` that keeps growing is a driver that has stopped
+    /// listening, which is the failure this counter exists to make visible.
+    pub fn report() -> (usize, u64, u64, u64, usize, u32) {
         let track = TRACK.lock();
         let signals = track
             .iter()
@@ -111,7 +113,8 @@ impl Notify {
             .sum::<u64>()
             + UNTRACKED.load(Ordering::Relaxed);
         let waiting = track.iter().map(|n| n.waiters()).sum();
-        (track.len(), signals, waits, saturated, waiting)
+        let pending = track.iter().map(|n| n.pending()).sum();
+        (track.len(), signals, waits, saturated, waiting, pending)
     }
 
     /// Record `count` signals and wake up to that many waiters; returns how

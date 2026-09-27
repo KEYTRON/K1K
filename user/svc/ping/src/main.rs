@@ -7,7 +7,7 @@
 #![no_std]
 #![no_main]
 
-use k1k_rt::{Cap, Error, exit, log, mem_map, recv, send, sleep_ms};
+use k1k_rt::{Cap, Error, exit, log, mem_map, recv, send, sleep_ms, uptime_ns};
 
 const REQ: Cap = Cap(0);
 const REP: Cap = Cap(1);
@@ -51,15 +51,30 @@ fn main() -> ! {
     let ack = b"ack from ping, same page\0";
     unsafe { core::ptr::copy_nonoverlapping(ack.as_ptr(), base.add(ACK_OFFSET), ack.len()) };
 
+    // Every reply is timed with the monotonic clock. A round trip through two
+    // IPC endpoints and a scheduler pass is a few hundred microseconds, and
+    // watching it stay flat is a cheap way to see the system get slower.
     let mut n = 0u64;
+    let mut worst = 0u64;
     loop {
         n += 1;
+        let sent = uptime_ns();
         if let Err(e) = send(REQ, n, 0, PING) {
             log!("send failed: {:?}", e);
             exit(4);
         }
         match recv(REP) {
-            Ok(m) => log!("got reply {} (tag {:#x})", m.words[0], m.words[2]),
+            Ok(m) => {
+                let rtt = uptime_ns().saturating_sub(sent);
+                worst = worst.max(rtt);
+                log!(
+                    "got reply {} (tag {:#x}) in {} us, worst {} us",
+                    m.words[0],
+                    m.words[2],
+                    rtt / 1000,
+                    worst / 1000
+                );
+            }
             Err(e) => {
                 log!("recv failed: {:?}", e);
                 exit(4);

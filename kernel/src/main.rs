@@ -21,9 +21,19 @@ mod sched;
 mod service;
 mod syscall;
 
+use arch::x86_64::clock;
 use core::panic::PanicInfo;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Spin briefly, with interrupts off, to show that the clock advances even when
+/// no interrupt has run. Long enough for the TSC to move, short enough not to be
+/// a delay.
+fn spin_a_little() {
+    for _ in 0..2_000_000 {
+        core::hint::spin_loop();
+    }
+}
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
@@ -121,6 +131,9 @@ unsafe extern "C" fn kmain() -> ! {
     arch::x86_64::interrupts::enable();
     klog!("irq", "interrupts on");
     arch::x86_64::pci::init();
+    // The HPET is a PCI function, so the platform timer can only be found once
+    // the bus has been scanned.
+    clock::init_platform_timer();
     klog!("sys", "syscall/sysret enabled");
     arch::x86_64::smp::start_aps();
 
@@ -220,15 +233,102 @@ unsafe extern "C" fn kmain() -> ! {
     }
 
     {
-        let (made, signals, waits, saturated, waiting) = notify::Notify::report();
+        clock::report();
+        // Every CPU records a TSC reading on the same tick. Converted back to
+        // nanoseconds they have to land within a hair of each other, or the
+        // counter is not in step and a clock read on one core means nothing on
+        // another.
+        let hz = clock::tsc_hz();
+        let mut worst = 0i64;
+        let mut baseline = None;
+        let mut sampled = 0;
+        let mut auxed = 0;
+        for cpu in 0..arch::x86_64::percpu::count() {
+            let Some(pc) = arch::x86_64::percpu::by_id(cpu) else {
+                continue;
+            };
+            let sample = pc.tsc_sample.load(core::sync::atomic::Ordering::Relaxed);
+            let aux = pc.tsc_aux.load(core::sync::atomic::Ordering::Relaxed);
+            if sample == 0 || hz == 0 {
+                continue;
+            }
+            sampled += 1;
+            // The reading has to belong to the CPU it was taken on, and the only
+            // way to know is what `rdtscp` put in TSC_AUX at the time. A machine
+            // that ignores TSC_AUX reports zero from everywhere, and then there
+            // is nothing to check rather than something to fail.
+            // The processor id is only worth checking where the machine keeps
+            // one: `rdtscp` puts TSC_AUX in the result whether or not anything
+            // ever wrote it, so a zero there means "nobody said", not "cpu 0".
+            if aux != clock::NO_PROCESSOR && clock::tsc_aux_supported() {
+                assert_eq!(
+                    aux as usize, cpu,
+                    "the TSC sample filed under cpu {cpu} carries processor id {aux}"
+                );
+                auxed += 1;
+            }
+            let ns = (sample / hz) * 1_000_000_000 + (sample % hz) * 1_000_000_000 / hz;
+            match baseline {
+                None => baseline = Some(ns),
+                Some(base) => {
+                    if let Some(diff) = ns.checked_sub(base) {
+                        worst = worst.max(diff as i64);
+                    }
+                }
+            }
+        }
+        // The samples are all taken on the same tick, so on a machine whose TSC
+        // is in step they land within a hair of each other. On a machine whose
+        // TSC is *not* in step there is nothing to compare — the kernel is not
+        // using that counter as a time base — so the number is reported and the
+        // check is left to the machines it can fail on.
+        let shared = hz != 0 && clock::source() == clock::Source::Tsc;
+        klog!(
+            "clock",
+            "{} cpu(s) sampled the TSC ({} with TSC_AUX{}), largest disagreement {} us{}",
+            sampled,
+            auxed,
+            if clock::tsc_aux_supported() {
+                ""
+            } else {
+                ", unsupported here"
+            },
+            worst / 1000,
+            if shared {
+                ""
+            } else {
+                " (the TSC is not the time base here)"
+            }
+        );
+        if shared {
+            assert!(
+                sampled > 1 && worst < 1_000_000,
+                "the TSC is not in step across cpus: {worst} ns apart"
+            );
+        }
+        // The clock has to move forward, and by about as much as a sleep.
+        let t0 = arch::x86_64::interrupts::uptime_ns();
+        x86_64::instructions::interrupts::without_interrupts(|| spin_a_little());
+        let t1 = arch::x86_64::interrupts::uptime_ns();
+        assert!(t1 > t0, "the clock stood still: {t0} then {t1}");
+        klog!(
+            "clock",
+            "monotonic: {} ns elapsed over a short pause",
+            t1 - t0
+        );
+    }
+
+    {
+        let (made, signals, waits, saturated, waiting, pending) = notify::Notify::report();
         klog!(
             "notify",
-            "{} object(s), {} signal(s) recorded, {} taken, {} folded into a full counter, {} task(s) waiting now{}",
+            "{} object(s), {} signal(s) recorded, {} taken, {} folded into a full counter, {} task(s) waiting now, {} untaken{}",
             made,
             signals,
             waits,
             saturated,
             waiting,
+            pending,
             if saturated > 0 {
                 " (a driver is not taking its signals)"
             } else {

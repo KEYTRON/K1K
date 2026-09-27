@@ -5,7 +5,7 @@
 
 use alloc::boxed::Box;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{GsBase, KernelGsBase};
 use x86_64::structures::tss::TaskStateSegment;
@@ -42,6 +42,13 @@ pub struct PerCpu {
     pub ipi_done: AtomicU32,
     /// Set when a reschedule request arrives, cleared when it is acted on.
     pub resched: AtomicBool,
+    /// TSC reading taken on the same tick as every other CPU's, and the tick it
+    /// was taken on. Two CPUs that read the counter seconds apart in real time
+    /// must still agree once the readings are converted back, which is what
+    /// makes the TSC usable as a clock every core can read.
+    pub tsc_sample: AtomicU64,
+    /// The processor id `rdtscp` reported with that sample.
+    pub tsc_aux: AtomicU32,
 }
 
 const _: () = {
@@ -72,6 +79,8 @@ impl PerCpu {
             ipi_seq: AtomicU32::new(0),
             ipi_done: AtomicU32::new(0),
             resched: AtomicBool::new(false),
+            tsc_sample: AtomicU64::new(0),
+            tsc_aux: AtomicU32::new(u32::MAX),
         }
     }
 }

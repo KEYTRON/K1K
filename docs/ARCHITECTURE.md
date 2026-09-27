@@ -180,6 +180,50 @@ B, which is itself waiting for the heap. The heap allocator wrapper and the
 PMM entry points disable interrupts for exactly that reason, and the tick
 handler wakes sleepers without allocating.
 
+## Clocks
+
+Three sources, and the kernel picks between them at boot rather than trusting
+one:
+
+- **TSC** — one instruction, no interrupt, the right thing to measure with. Its
+  rate is *measured*, not read: the CPU's own claim (CPUID leaf 0x15/0x16) is
+  logged as a cross-check, and the number used comes from counting the counter
+  against the PIT across five windows, taking the median so one stolen
+  interrupt cannot set the rate. The TSC is only the time base where the CPU
+  says it is invariant (CPUID 0x80000007). A TSC that is not invariant may run at
+  a different rate, or from a different origin, on every core, and a clock that
+  means different things on different cores is worse than no clock.
+- **HPET** — the platform timer, in system memory, so it means the same thing
+  on every core by construction. Found through the ACPI description table and,
+  where the firmware lists it, through the PCI bus; the register block belongs to
+  a PCI function that has to be told to decode its BAR, which nothing in this
+  boot path does. Its rate is *counted* against the calibrated TSC rather than
+  decoded from its capability register, because implementations spell that field
+  differently. Every timer is masked and its comparator parked before the main
+  counter is switched on: reset leaves the comparators at zero with their
+  interrupts enabled, and enabling the counter without that is an interrupt storm
+  that looks exactly like a hung machine. If the counter does not move
+  afterwards, the HPET is refused rather than believed.
+- **The tick counter** — whole milliseconds, boot processor only. The fallback
+  when neither of the others is available, which is what a filtered CPUID view
+  and an emulated HPET between them produce.
+
+`now_ns()` reads whichever source won and is always available; the boot summary
+says which, and `uptime_ms()` is built on it, so the autotest's own deadline
+stops being quantised to interrupts. Every CPU takes a TSC reading on the same
+tick; on a machine whose TSC is in step those readings land within a hair of one
+another once converted back to nanoseconds, and the autotest fails if they do
+not. `rdtscp`'s processor id makes each sample attributable — and both `rdtscp`
+and the TSC_AUX register are checked in CPUID before use, because executing an
+instruction the processor does not have, from the timer interrupt, is an invalid
+opcode trap rather than a graceful degradation.
+
+`make test-kvm` runs the same autotest with KVM, where the machine is the host:
+the TSC is the host's own and the HPET is the chipset's real one. TCG emulates
+neither faithfully — it refuses to claim an invariant TSC at all, and its HPET
+answers every register with the same constant — so the paths that matter are only
+exercised there. It is skipped, not failed, where KVM is missing.
+
 ## Objects, capabilities, IPC
 
 ```
@@ -448,6 +492,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 23 | `notify_create` | — | new slot (`SIGNAL|WAIT|GRANT`), `ENOMEM` |
 | 24 | `notify_wait` | `slot, mode` (0 one, 1 poll, 2 all) | signals taken, `EAGAIN` from a poll, `EPERM`, `EINVAL` |
 | 25 | `notify_signal` | `slot, count` | waiters woken, `EPERM`, `EINVAL` |
+| 26 | `time` | — | nanoseconds since boot, monotonic on every core |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

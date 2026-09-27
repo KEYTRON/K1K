@@ -118,6 +118,7 @@ pub mod sys {
     pub const NOTIFY_CREATE: u64 = 23;
     pub const NOTIFY_WAIT: u64 = 24;
     pub const NOTIFY_SIGNAL: u64 = 25;
+    pub const TIME: u64 = 26;
 }
 
 /// Maximum capabilities one `spawn` can hand over.
@@ -222,6 +223,15 @@ pub fn exit(code: i64) -> ! {
 
 pub fn yield_now() {
     syscall(sys::YIELD, 0, 0, 0, 0);
+}
+
+/// Nanoseconds since boot, monotonic on every core.
+///
+/// This is the clock to measure with: the tick counter it replaced advances in
+/// whole interrupts and only on the boot processor, which is fine for a quantum
+/// and useless for a delay.
+pub fn uptime_ns() -> u64 {
+    check(syscall(sys::TIME, 0, 0, 0, 0)).unwrap_or(0)
 }
 
 pub fn sleep_ms(ms: u64) {

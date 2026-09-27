@@ -48,7 +48,13 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [x] IPIs: TLB shootdown (before an address space is freed, and after a change
   to the shared kernel half) and remote rescheduling (a woken task pulls an idle
   CPU out of `hlt` instead of waiting for the next tick)
-- [ ] HPET/TSC clocks
+- [x] HPET/TSC clocks: the TSC measured against the PIT and used only where the
+  CPU says it is invariant, the HPET found in ACPI and on the PCI bus with its
+  timers masked and its rate counted, and the tick counter as the fallback. The
+  base is chosen at boot, the `time` syscall and `uptime_ms()` come from it, and
+  every CPU's TSC reading is checked against every other. `make test-kvm` runs
+  the autotest on the host's own TSC and HPET, which is the only place those
+  paths can be trusted at all: TCG emulates neither
 - [ ] Capability revocation (the `SIGNAL`/`WAIT` split is the groundwork)
 - [ ] A scheduler without a single global lock
 - [x] Returning the bootloader's memory to the PMM

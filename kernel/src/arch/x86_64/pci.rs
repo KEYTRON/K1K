@@ -176,6 +176,15 @@ pub fn init() {
     DEVICES.call_once(|| list);
 }
 
+/// Find a function by its vendor and device ids.
+pub fn find_id(vendor: u16, device: u16) -> Option<PciDevice> {
+    DEVICES
+        .get()?
+        .iter()
+        .copied()
+        .find(|d| d.vendor == vendor && d.device == device)
+}
+
 pub fn find(class: u8, subclass: u8) -> Option<PciDevice> {
     DEVICES
         .get()?

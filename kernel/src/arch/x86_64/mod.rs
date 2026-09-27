@@ -1,5 +1,6 @@
 pub mod acpi;
 pub mod apic;
+pub mod clock;
 pub mod context;
 pub mod gdt;
 pub mod idt;

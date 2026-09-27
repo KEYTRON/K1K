@@ -127,6 +127,12 @@ a FAT volume.
   (first fit, free list in address order, in-place `realloc`), so services can
   use `Box`, `Vec`, `String` and `format!`. It is tested on the host against an
   independent reading of its own block list (`make test-heap`).
+- Real clocks: a time base chosen at boot from the TSC (measured against the PIT,
+  used only where the CPU vouches that it is invariant), the HPET (found in ACPI
+  and on the PCI bus, its rate counted rather than decoded, its timers masked
+  before the counter is switched on), or the tick counter as the fallback — never
+  assumed. `uptime_ms()` and the `time` syscall come from it, and the ping/pong
+  round trip is timed with it.
 - Asynchronous notifications: a `Notify` object is a counter of things that
   happened with tasks waiting for the next one. A signal that arrives before the
   wait is still there afterwards, so a driver cannot miss an interrupt the way a
@@ -207,8 +213,8 @@ limine.conf       bootloader configuration
 - A file-service protocol (open/read over IPC) so spawned services can read
   files themselves; passing capabilities to spawned services; a service
   manifest on disk instead of "everything in /SVC".
-- Capability revocation; HPET/TSC; a scheduler without one global lock; WARP
-  packages as the way service binaries reach `/SVC`.
+- Capability revocation; a scheduler without one global lock; WARP packages as
+  the way service binaries reach `/SVC`.
 
 ## License
 
