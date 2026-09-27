@@ -37,6 +37,8 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   `/SVC/MANIFEST.TXT` lists is started
 - [x] A heap for every ring-3 task, with `k1k-rt` as its global allocator
   (host-tested against its own block list, `make test-heap`)
+- [x] One allocator for the kernel and for services: the `k1k-alloc` crate,
+  tested on the host with a fixed service heap and a growing kernel one
 
 ## Kernel: time, notifications, revocation
 - [ ] Asynchronous notifications
@@ -47,7 +49,9 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [ ] Capability revocation
 - [ ] A scheduler without a single global lock
 - [x] Returning the bootloader's memory to the PMM
-- [ ] A growing kernel heap (still a fixed 16 MiB window)
+- [x] A growing kernel heap: a 1 GiB window that starts unmapped and takes
+  mebibytes from the PMM as they are needed, announcing the new pages to the
+  other CPUs once interrupts are back on
 
 ## K1OS on K1K
 - [x] K1OS boots on K1K (boot test in CI on every push)

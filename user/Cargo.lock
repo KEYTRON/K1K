@@ -31,8 +31,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "k1k-alloc"
+version = "1.0.0-alpha.1"
+
+[[package]]
 name = "k1k-rt"
 version = "1.0.0-alpha.1"
+dependencies = [
+ "k1k-alloc",
+]
 
 [[package]]
 name = "kbd"

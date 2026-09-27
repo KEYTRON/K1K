@@ -5,13 +5,17 @@
 //! panic handler that reports through the kernel log and exits.
 
 #![no_std]
+// A service that runs out of heap reports what the heap looked like, which
+// needs the unstable alloc error handler.
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
 use core::arch::{asm, naked_asm};
 use core::fmt::{self, Write};
 
-pub use heap::{HeapStats, heap_free, heap_stats};
+pub use heap::{heap_free, heap_stats};
+pub use k1k_alloc::Stats as HeapStats;
 
 pub mod file;
 pub mod fsproto;
@@ -547,4 +551,32 @@ pub unsafe extern "C" fn _start() -> ! {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log!("panic: {}", info);
     exit(101)
+}
+
+/// An allocation the task heap could not serve.
+///
+/// Rust's own handler says how many bytes it wanted and stops there, which for
+/// a service means the supervisor restarts something that will fail the same way
+/// forever. The heap's own counters are what tell the two apart: a heap that ran
+/// out of room is a sizing question, a heap with plenty free is a bug in the
+/// allocator.
+#[alloc_error_handler]
+fn out_of_memory(layout: core::alloc::Layout) -> ! {
+    let s = heap::heap_stats();
+    let blocks = unsafe { heap::with_heap(|h| h.blocks()) };
+    log!(
+        "out of memory: wanted {} bytes (align {}), heap {} KiB in {} region(s), {} KiB free, \
+         {} blocks, {} live, {} allocs / {} frees, peak {} KiB",
+        layout.size(),
+        layout.align(),
+        s.region_bytes / 1024,
+        s.regions,
+        s.region_bytes.saturating_sub(s.in_use) / 1024,
+        blocks,
+        s.live,
+        s.allocs,
+        s.frees,
+        s.peak / 1024
+    );
+    exit(102)
 }

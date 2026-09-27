@@ -1,0 +1,14 @@
+[package]
+name = "k1k-alloc"
+version = "1.0.0-alpha.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "K1K allocator: the kernel heap and the ring-3 service heap are the same code"
+
+# Standalone package rather than a workspace member: both the kernel crate and
+# the `user` workspace depend on it by path, and a package can only be a member
+# of one workspace.
+
+[lib]
+test = false
+bench = false

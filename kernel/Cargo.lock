@@ -24,11 +24,16 @@ checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
 name = "k1k"
 version = "1.0.0-alpha.1"
 dependencies = [
+ "k1k-alloc",
  "limine",
  "linked_list_allocator",
  "spin",
  "x86_64",
 ]
+
+[[package]]
+name = "k1k-alloc"
+version = "1.0.0-alpha.1"
 
 [[package]]
 name = "limine"

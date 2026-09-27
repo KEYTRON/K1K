@@ -46,7 +46,8 @@ a FAT volume.
 - GDT/TSS, IDT with exception handlers; kernel traps panic, user traps kill only
   the offending task.
 - Physical memory (bitmap PMM over the Limine memory map), kernel page mapping,
-  per-task user address spaces sharing the kernel half, kernel heap.
+  per-task user address spaces sharing the kernel half, a growing kernel
+  heap.
 - ACPI (RSDP → RSDT/XSDT → MADT), Local APIC timer calibrated against the
   PIT, I/O APIC routing with MADT interrupt overrides; legacy PICs disabled.
 - Preemptive round-robin scheduler (LAPIC timer @ 1 kHz, 10 ms quantum),
@@ -126,6 +127,11 @@ a FAT volume.
   (first fit, free list in address order, in-place `realloc`), so services can
   use `Box`, `Vec`, `String` and `format!`. It is tested on the host against an
   independent reading of its own block list (`make test-heap`).
+- One allocator for both: the kernel heap and the service heaps are the same
+  `k1k-alloc` crate. The kernel heap starts with nothing mapped and takes
+  mebibytes from the physical allocator as it needs them, announces the new
+  pages to the other CPUs once interrupts are back on, and is guarded by a spin
+  lock and by interrupts off.
 
 ```
 [superv] nvme 00:03.0 handed to service 'blk'
@@ -192,13 +198,11 @@ limine.conf       bootloader configuration
 
 ## Roadmap (short)
 
-- Asynchronous notifications; IPIs (TLB shootdown, remote reschedule);
-  HPET/TSC clock.
 - A file-service protocol (open/read over IPC) so spawned services can read
   files themselves; passing capabilities to spawned services; a service
   manifest on disk instead of "everything in /SVC".
-- Capability revocation; an allocator for `k1k-rt`; WARP packages as the way
-  service binaries reach `/SVC`.
+- Capability revocation; asynchronous notifications; HPET/TSC; WARP packages as
+  the way service binaries reach `/SVC`.
 
 ## License
 

@@ -18,6 +18,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 k1k-rt = { path = "rt" }
+k1k-alloc = { path = "../crates/k1k-alloc" }
 
 [profile.release]
 panic = "abort"

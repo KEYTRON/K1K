@@ -113,13 +113,14 @@ test: test-iso $(DISK)
 		&& grep -q 'hello\] /SVC holds' $(BUILD)/serial.log \
 		&& grep -q 'hello\] /README.TXT:' $(BUILD)/serial.log
 
-# The service allocator is plain logic over a byte range, so it can be tested on
-# the host: the harness keeps the system allocator and drives K1kHeap directly,
-# auditing the block list after every operation. `make test-heap`.
+# The allocator behind both the kernel heap and the service heap is plain logic
+# over byte ranges, so it can be tested on the host: the harness keeps the
+# system allocator and drives the crate directly, auditing the block list after
+# every operation, with and without the supplier handing out more memory.
+# `make test-heap`.
 test-heap:
 	@mkdir -p $(BUILD)/heaptest
-	sed -e 's|^#\[global_allocator\]$$|//&|' -e 's|^static ALLOCATOR: K1kHeap|//static ALLOCATOR: K1kHeap|' \
-		user/rt/src/heap.rs > $(BUILD)/heaptest/heap_under_test.rs
+	cp crates/k1k-alloc/src/lib.rs $(BUILD)/heaptest/k1k_alloc.rs
 	cp tools/heap_test.rs $(BUILD)/heaptest/test.rs
 	cd $(BUILD)/heaptest && rustc -O --edition 2024 -o test test.rs
 	$(BUILD)/heaptest/test

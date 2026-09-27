@@ -85,17 +85,22 @@ unsafe extern "C" fn kmain() -> ! {
             v.push(i * 3);
         }
         let b = alloc::boxed::Box::new([7u8; 4096]);
-        let (used, free) = mm::heap::stats();
+        let h = mm::heap::stats();
         klog!(
             "heap",
-            "alloc ok: vec[99999]={} box[0]={} used={} KiB free={} KiB",
+            "alloc ok: vec[99999]={} box[0]={} used={} KiB free={} KiB in {} region(s)",
             v[99_999],
             b[0],
-            used / 1024,
-            free / 1024
+            h.in_use / 1024,
+            h.region_bytes.saturating_sub(h.in_use) / 1024,
+            h.regions
         );
         drop(v);
         drop(b);
+        // The heap has to hand memory back: after the drops above the live
+        // count has to be the one allocation that is still out there.
+        let h = mm::heap::stats();
+        assert_eq!(h.live, 0, "heap leak: {} live block(s)", h.live);
         let asp = mm::vmm::AddressSpace::new().expect("address space");
         klog!(
             "vmm",
@@ -165,6 +170,54 @@ unsafe extern "C" fn kmain() -> ! {
         "--- autotest summary at {} ms ---",
         arch::x86_64::interrupts::uptime_ms()
     );
+
+    // Grow the heap with the application processors already running: the pages
+    // come from the PMM inside the allocator's critical section, and the flush
+    // that tells the other CPUs about them has to happen after it, not from
+    // inside it. A kernel that mapped the heap once at boot would never notice
+    // a mistake here.
+    {
+        let before = mm::heap::stats();
+        let mut v: alloc::vec::Vec<alloc::boxed::Box<[u8; 4096]>> = alloc::vec::Vec::new();
+        for i in 0..2048u32 {
+            v.push(alloc::boxed::Box::new([(i % 251) as u8; 4096]));
+        }
+        let mut sum = 0u64;
+        for (i, b) in v.iter().enumerate() {
+            sum += b[0] as u64 * (i as u64 + 1);
+        }
+        let grew = mm::heap::stats();
+        klog!(
+            "heap",
+            "grew with {} cpu(s) up: {} KiB -> {} KiB in {} region(s), sum {}",
+            arch::x86_64::percpu::count(),
+            before.region_bytes / 1024,
+            grew.region_bytes / 1024,
+            grew.regions,
+            sum
+        );
+        assert!(
+            grew.region_bytes > before.region_bytes,
+            "the heap did not grow when 8 MiB was asked for"
+        );
+        assert_eq!(
+            v[2047][0],
+            (2047 % 251) as u8,
+            "heap corrupted a block it handed out"
+        );
+        drop(v);
+        // The eight mebibytes have to go back: the services running alongside
+        // keep their own allocations, so this compares against the heap as it
+        // was rather than expecting it empty.
+        let back = mm::heap::stats();
+        assert!(
+            back.in_use <= before.in_use + 64 * 1024,
+            "heap leak: {} KiB in use, was {} KiB before the growth test",
+            back.in_use / 1024,
+            before.in_use / 1024
+        );
+    }
+
     let mut ap_switches = 0u64;
     let mut ipi_total = 0u32;
     for cpu in 0..arch::x86_64::percpu::count() {

@@ -107,8 +107,15 @@ fn announce_shared(start: VirtAddr, len: u64) {
     }
 }
 
-/// Map `count` fresh frames at `start` in the kernel address space.
-pub fn map_kernel_pages(
+/// Map `count` zeroed frames at `start` in the kernel address space.
+///
+/// The other CPUs are *not* told. Kernel-half mappings are global, so a CR3
+/// reload elsewhere would not pick them up and a page-walk cache elsewhere may
+/// still hold the old, absent entry, so somebody has to announce the range
+/// afterwards with [`flush_shared_range`] — which is why the kernel heap does
+/// it after leaving its critical section rather than from inside the allocator,
+/// where an IPI would never be acknowledged.
+pub fn map_kernel_pages_deferred(
     start: VirtAddr,
     count: usize,
     flags: PageTableFlags,
@@ -117,7 +124,7 @@ pub fn map_kernel_pages(
     let mut alloc = GlobalFrameAllocator;
     for i in 0..count {
         let page = Page::containing_address(start + (i as u64) * pmm::FRAME_SIZE);
-        let frame = pmm::alloc_frame().ok_or(MapToError::FrameAllocationFailed)?;
+        let frame = pmm::alloc_zeroed_frame().ok_or(MapToError::FrameAllocationFailed)?;
         unsafe {
             mapper
                 .map_to(
@@ -129,7 +136,6 @@ pub fn map_kernel_pages(
                 .flush();
         }
     }
-    announce_shared(start, (count * pmm::FRAME_SIZE as usize) as u64);
     Ok(())
 }
 
@@ -173,6 +179,13 @@ fn map_phys_range(phys: PhysAddr, len: u64, extra: PageTableFlags) {
             added,
         );
     }
+}
+
+/// Tell every CPU that a kernel-half range changed. Kernel-half mappings are
+/// global, so a CR3 reload elsewhere would not pick them up, and a page-walk
+/// cache elsewhere may still hold the old, absent entry.
+pub fn flush_shared_range(start: VirtAddr, end: VirtAddr) {
+    announce_shared(start, end.as_u64().saturating_sub(start.as_u64()));
 }
 
 /// Map firmware tables (ACPI etc.) that base revision 3 leaves out of the HHDM.

@@ -59,7 +59,7 @@ the stub swaps GS back for ring-3 frames and `iretq`s.
 | User image | from `0x0000_0000_0040_0000` | ELF `PT_LOAD` segments, R / RX / RW per segment flags |
 | User stack | below `0x0000_7fff_ffff_0000` | 16 pages, NX |
 | HHDM | `0xffff_8000_0000_0000` (Limine-provided) | physical memory direct map |
-| Kernel heap | `0xffff_9000_0000_0000` | 16 MiB, mapped at init |
+| Kernel heap | `0xffff_9000_0000_0000` | 1 GiB window, mapped as it grows |
 | Kernel image | `0xffffffff80000000` | |
 
 - **PMM** (`mm/pmm.rs`): one bit per 4 KiB frame, bitmap stored in the largest
@@ -68,7 +68,23 @@ the stub swaps GS back for ring-3 frames and `iretq`s.
   A user `AddressSpace` is a fresh PML4 whose entries 256..512 are copied from
   the kernel PML4, so the kernel half is shared and the user half is private.
   Dropping an `AddressSpace` frees every user-half table and frame.
-- **Heap** (`mm/heap.rs`): `linked_list_allocator` over a fixed mapped window.
+- **Heap** (`mm/heap.rs`): the shared `k1k-alloc` block allocator over a
+  1 GiB *window* of address space that holds nothing at boot. When the free list
+  cannot serve a request, `FrameSupply` takes at least a mebibyte from the PMM,
+  zeroes it and maps it at the top of the window, so the kernel commits the
+  memory it actually uses. Two details make that safe:
+  - Growth maps pages, which allocates page tables from the PMM — a different
+    allocator, so it cannot re-enter the heap. The rule that follows from this
+    is that nothing on the heap's critical section may allocate.
+  - The other CPUs are not told about the new pages from inside that critical
+    section, because an IPI is acknowledged by an interrupt handler and
+    interrupts are off. The supplier publishes the range and the allocator
+    wrapper announces it once interrupts are back on, which is the only point
+    where waiting for acknowledgements is allowed. A request from an interrupt
+    handler leaves the range pending for the next allocation that can flush it.
+  The heap is guarded by a spin lock *and* by interrupts off, because kernel
+  allocations happen on every CPU at once; the lock is never held across
+  anything that can block.
 
 ## Tasks and scheduling
 
@@ -342,10 +358,13 @@ argument reports.
 
 ### The service heap
 
-`k1k-rt` provides the global allocator for every ring-3 program: first fit over
-a free list kept in address order, doubly linked so `dealloc` merges with both
-neighbours in constant time, and a `realloc` that grows or shrinks in place
-whenever the neighbouring block allows. Two details matter more than they look:
+`k1k-rt` provides the global allocator for every ring-3 program, and it is the
+same code as the kernel heap: the `k1k-alloc` crate, first fit over a free list
+kept in address order, doubly linked so `dealloc` merges with both neighbours in
+constant time, and a `realloc` that grows or shrinks in place whenever the
+neighbouring block allows. A service gets one fixed range and a supplier that
+has nothing more to give; the kernel heap gets a window and a supplier that
+takes pages from the PMM. Two details matter more than they look:
 
 - Block sizes are rounded up to 16 bytes so the "free" flag can live in bit 0
   of the size word; a size that was not a multiple of two would make the flag
@@ -355,9 +374,19 @@ whenever the neighbouring block allows. Two details matter more than they look:
   the distance back to its header in the word below itself, which is what lets
   `dealloc` find the block again.
 
-`make test-heap` runs the allocator on the host against a stub boot-info page
-and audits the block list — sizes, links, tiling, overlap, and the accounting —
-after every single operation of a 50,000-round churn. It is part of CI.
+`make test-heap` compiles that crate straight into a host test and audits the
+block list after every single operation — sizes, links, tiling, overlap, the
+back-links every live payload must resolve to, the accounting, and that no two
+free blocks sit next to each other (a missed coalesce shows up as a heap that
+turns down requests it has the memory for). It runs a short churn with the audit
+on every step, a long one with it every thousand steps, and a workload shaped
+like a real service: fill a 4 MiB heap with 1 KiB blocks, free the bottom half
+and ask for a chunk that spans it, then real `Vec`s doubling into the tens of
+kilobytes. It is part of CI.
+
+A service that cannot get memory says so with its heap's numbers — region size,
+free bytes, block count — rather than a bare allocation failure, because a heap
+that ran out of room and a heap whose list is broken need different fixes.
 
 Faults in ring 3 (`#PF`, `#GP`, `#UD`, …) are routed by the IDT handlers to
 `sched::on_user_fault`, which marks the task dead and schedules away. The same

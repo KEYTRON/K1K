@@ -12,6 +12,7 @@ test = false
 bench = false
 
 [dependencies]
+k1k-alloc = { path = "../crates/k1k-alloc" }
 limine = "0.6"
 x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 spin = "0.10"
