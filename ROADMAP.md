@@ -59,13 +59,15 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   landed in, `cap_revoke` takes it back, a revoked slot is a tombstone that is
   never reused, and tearing a task down strips its table. Withdrawing authority
   from another task needs `Control`, checked before the task is looked up
-- [ ] A scheduler without a single global lock: per-CPU run queues with work
-  stealing and per-CPU sleeper lists, keeping the task table for the slow paths
-  only. The scheduling logic is written and the boot now gets as far as the end
-  of the autotest; what is left is one context switch that resumes a task with
-  a `ctx_sp` that points into a `Task` struct instead of a stack frame. It is
-  not committed: the tree stays green instead. Everything known about it is in
-  `~/git/K1K-notes/sched-findings.md` and `~/git/K1K-notes/sched-percpu-runqueues.WIP.patch`
+- [x] A scheduler without a single global lock: one run queue per CPU, work
+  stealing with a bounded number of queues tried, per-CPU sleeper lists, and the
+  task table kept for the slow paths only. A task is in exactly one place at a
+  time and that is one compare-and-swap per move, so a task that would end up
+  in two is caught at the transition that did it. Waking a task that is still
+  on another CPU leaves it to that CPU, nothing that can wait for another CPU
+  runs under a lock, and a task is never suspended inside a trap taken from
+  ring 3 — a tick that arrives while a task is in user code waits for its next
+  syscall
 - [x] Returning the bootloader's memory to the PMM
 - [x] A growing kernel heap: a 1 GiB window that starts unmapped and takes
   mebibytes from the PMM as they are needed, announcing the new pages to the
@@ -73,6 +75,10 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   mapped before the other CPUs start, because a page-table change is only
   visible after a TLB shootdown and the allocator cannot send one with
   interrupts off
+
+- [ ] Preempting ring-3 code at an arbitrary point, rather than at a syscall:
+  resuming a task that was interrupted in user code means unwinding the trap
+  frame (`ret_from_user` in Linux terms) instead of a plain `ret`
 
 ## K1OS on K1K
 - [x] K1OS boots on K1K (boot test in CI on every push)

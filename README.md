@@ -145,6 +145,24 @@ a FAT volume.
   full message queue loses one — and `SIGNAL` and `WAIT` are separate rights, so
   the waiting half of a relationship can be handed out on its own. The
   keyboard driver in ring 3 takes its interrupts this way.
+- One run queue per CPU: the scheduler gives every processor its own ready queue
+  and its own list of sleeping tasks, so a switch from one task to the next does
+  not go through a lock the whole machine shares; a CPU with nothing to do takes
+  a task off a neighbour's queue instead. The task table is still there for
+  spawning, waking, reaping and looking a task up by name, none of which are on
+  the way from one task to the next. A task is in exactly one place at a time —
+  one queue, one CPU, or one CPU's idle context — and that is one word per task
+  with a compare-and-swap on every move, so a scheduler that put one task in two
+  places would say so at the move that did it instead of letting two CPUs run it
+  on one stack.
+- Three rules the scheduler keeps, each of which is a bug it used to have: waking
+  a task that is still on another CPU leaves it to that CPU, which notices on the
+  way out that the task is Ready and puts it back; nothing that can wait for
+  another CPU runs under a lock, so a task is built before the table is locked
+  and every lock is taken with interrupts off; and a task is never switched away
+  from inside an interrupt taken while it was in user code, because the saved
+  stack pointer would land in the middle of the trap frame — that tick waits for
+  the task's next syscall, which is ordinary kernel code.
 - One allocator for both: the kernel heap and the service heaps are the same
   `k1k-alloc` crate. The kernel heap starts with nothing mapped and takes
   mebibytes from the physical allocator as it needs them, announces the new
