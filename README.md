@@ -149,7 +149,9 @@ a FAT volume.
   `k1k-alloc` crate. The kernel heap starts with nothing mapped and takes
   mebibytes from the physical allocator as it needs them, announces the new
   pages to the other CPUs once interrupts are back on, and is guarded by a spin
-  lock and by interrupts off.
+  lock and by interrupts off. The first 16 MiB of the window are mapped before
+  the other CPUs start, so a page-table change never has to be announced from
+  inside the allocator, where an IPI could not be acknowledged.
 
 ```
 [superv] nvme 00:03.0 handed to service 'blk'

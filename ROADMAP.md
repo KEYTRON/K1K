@@ -59,11 +59,19 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   landed in, `cap_revoke` takes it back, a revoked slot is a tombstone that is
   never reused, and tearing a task down strips its table. Withdrawing authority
   from another task needs `Control`, checked before the task is looked up
-- [ ] A scheduler without a single global lock
+- [ ] A scheduler without a single global lock: per-CPU run queues with work
+  stealing and per-CPU sleeper lists, keeping the task table for the slow paths
+  only. Attempted in `~/git/K1K-notes/sched-percpu-runqueues.WIP.rs`; the run
+  queue, the per-CPU pointers and the atomic task state are written, but the
+  boot still hung and the tree was left at a green commit rather than
+  half-finished
 - [x] Returning the bootloader's memory to the PMM
 - [x] A growing kernel heap: a 1 GiB window that starts unmapped and takes
   mebibytes from the PMM as they are needed, announcing the new pages to the
-  other CPUs once interrupts are back on
+  other CPUs once interrupts are back on. The first 16 MiB of the window are
+  mapped before the other CPUs start, because a page-table change is only
+  visible after a TLB shootdown and the allocator cannot send one with
+  interrupts off
 
 ## K1OS on K1K
 - [x] K1OS boots on K1K (boot test in CI on every push)
