@@ -127,6 +127,12 @@ a FAT volume.
   (first fit, free list in address order, in-place `realloc`), so services can
   use `Box`, `Vec`, `String` and `format!`. It is tested on the host against an
   independent reading of its own block list (`make test-heap`).
+- Asynchronous notifications: a `Notify` object is a counter of things that
+  happened with tasks waiting for the next one. A signal that arrives before the
+  wait is still there afterwards, so a driver cannot miss an interrupt the way a
+  full message queue loses one — and `SIGNAL` and `WAIT` are separate rights, so
+  the waiting half of a relationship can be handed out on its own. The
+  keyboard driver in ring 3 takes its interrupts this way.
 - One allocator for both: the kernel heap and the service heaps are the same
   `k1k-alloc` crate. The kernel heap starts with nothing mapped and takes
   mebibytes from the physical allocator as it needs them, announces the new
@@ -201,8 +207,8 @@ limine.conf       bootloader configuration
 - A file-service protocol (open/read over IPC) so spawned services can read
   files themselves; passing capabilities to spawned services; a service
   manifest on disk instead of "everything in /SVC".
-- Capability revocation; asynchronous notifications; HPET/TSC; WARP packages as
-  the way service binaries reach `/SVC`.
+- Capability revocation; HPET/TSC; a scheduler without one global lock; WARP
+  packages as the way service binaries reach `/SVC`.
 
 ## License
 

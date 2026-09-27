@@ -41,12 +41,15 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
   tested on the host with a fixed service heap and a growing kernel one
 
 ## Kernel: time, notifications, revocation
-- [ ] Asynchronous notifications
+- [x] Asynchronous notifications: a `Notify` object is a counter of events with
+  tasks waiting on it, so an event that arrives before the wait is not lost.
+  `SIGNAL` and `WAIT` are separate rights; `irq_bind` can deliver an interrupt
+  as a signal, which is what the ring-3 keyboard driver uses
 - [x] IPIs: TLB shootdown (before an address space is freed, and after a change
   to the shared kernel half) and remote rescheduling (a woken task pulls an idle
   CPU out of `hlt` instead of waiting for the next tick)
 - [ ] HPET/TSC clocks
-- [ ] Capability revocation
+- [ ] Capability revocation (the `SIGNAL`/`WAIT` split is the groundwork)
 - [ ] A scheduler without a single global lock
 - [x] Returning the bootloader's memory to the PMM
 - [x] A growing kernel heap: a 1 GiB window that starts unmapped and takes

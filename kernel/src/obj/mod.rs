@@ -14,6 +14,7 @@ use crate::arch::x86_64::irq::IrqObject;
 use crate::arch::x86_64::pci::PciDevice;
 use crate::ipc::Endpoint;
 use crate::mm::pmm;
+use crate::notify::Notify;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rights(pub u32);
@@ -28,6 +29,11 @@ impl Rights {
     pub const DMA: Rights = Rights(1 << 5);
     /// May create new services from ELF images (on a `Control` capability).
     pub const SPAWN: Rights = Rights(1 << 6);
+    /// May record a signal on a `Notify`. Separate from `WAIT` so one half of a
+    /// relationship can be handed out without the other.
+    pub const SIGNAL: Rights = Rights(1 << 7);
+    /// May take signals from a `Notify`.
+    pub const WAIT: Rights = Rights(1 << 8);
 
     pub const fn contains(self, other: Rights) -> bool {
         self.0 & other.0 == other.0
@@ -113,6 +119,8 @@ pub struct PortRange {
 #[derive(Clone)]
 pub enum Object {
     Endpoint(Arc<Endpoint>),
+    /// A counter of things that happened, with tasks waiting for the next one.
+    Notify(Arc<Notify>),
     Memory(Arc<MemoryObject>),
     Device(Arc<DeviceObject>),
     Irq(Arc<IrqObject>),
@@ -131,6 +139,12 @@ impl Capability {
     pub fn endpoint(&self) -> Option<&Arc<Endpoint>> {
         match &self.object {
             Object::Endpoint(e) => Some(e),
+            _ => None,
+        }
+    }
+    pub fn notify(&self) -> Option<&Arc<Notify>> {
+        match &self.object {
+            Object::Notify(n) => Some(n),
             _ => None,
         }
     }

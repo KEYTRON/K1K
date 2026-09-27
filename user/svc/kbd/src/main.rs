@@ -2,14 +2,19 @@
 //!
 //! The kernel knows nothing about keyboards: it hands this service an
 //! interrupt object for ISA IRQ 1 (slot 0) and the 8042 port range (slot 1).
-//! Each interrupt arrives as a message on an endpoint we create, we drain the
-//! controller's output buffer through the port capability, decode scancode
-//! set 1 (US layout) and echo completed lines. If we crash, the supervisor
-//! restarts us and keys keep working.
+//! Each interrupt signals a notification we create, we take every signal there
+//! is and drain the controller's output buffer through the port capability,
+//! decode scancode set 1 (US layout) and echo completed lines. If we crash, the
+//! supervisor restarts us and keys keep working.
+//!
+//! A notification rather than an endpoint on purpose: the controller can buffer
+//! scancodes faster than we drain them, and with a message queue a full queue
+//! loses keystrokes without telling anybody. Here a keystroke that arrives while
+//! we are busy is simply still counted when we come back for it.
 #![no_std]
 #![no_main]
 
-use k1k_rt::{Cap, ep_create, exit, irq_ack, irq_bind, log, port_in, recv};
+use k1k_rt::{Cap, WaitMode, exit, irq_ack, irq_bind, log, notify_create, notify_wait, port_in};
 
 const IRQ: Cap = Cap(0);
 const PORTS: Cap = Cap(1);
@@ -72,9 +77,9 @@ impl Decoder {
 }
 
 fn main() -> ! {
-    let ep = ep_create().unwrap_or_else(|e| die("ep_create", e));
-    irq_bind(IRQ, ep).unwrap_or_else(|e| die("irq_bind", e));
-    log!("keyboard driver online (ring 3, IRQ 1 via endpoint), type and press Enter");
+    let keys = notify_create().unwrap_or_else(|e| die("notify_create", e));
+    irq_bind(IRQ, keys).unwrap_or_else(|e| die("irq_bind", e));
+    log!("keyboard driver online (ring 3, IRQ 1 via notification), type and press Enter");
 
     let mut dec = Decoder {
         shift: false,
@@ -82,11 +87,17 @@ fn main() -> ! {
         line: [0; 120],
         len: 0,
     };
-    // Drain anything the controller buffered before we were listening.
+    // Drain anything the controller buffered before we were listening. The
+    // line is masked until the first ack, so this is really about the state we
+    // inherited, not about signals.
     drain(&mut dec);
+    let _ = irq_ack(IRQ);
     loop {
-        if let Err(e) = recv(ep) {
-            die("recv", e);
+        // Take every signal at once: one wake-up covers whatever number of
+        // scancodes the controller is holding.
+        match notify_wait(keys, WaitMode::All) {
+            Ok(_) => {}
+            Err(e) => die("notify_wait", e),
         }
         drain(&mut dec);
         let _ = irq_ack(IRQ);

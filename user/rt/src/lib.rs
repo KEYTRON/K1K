@@ -115,6 +115,9 @@ pub mod sys {
     pub const PORT_OUT: u64 = 21;
     /// `spawn` with a descriptor: image, name, capabilities and arguments.
     pub const SPAWN_DESC: u64 = 22;
+    pub const NOTIFY_CREATE: u64 = 23;
+    pub const NOTIFY_WAIT: u64 = 24;
+    pub const NOTIFY_SIGNAL: u64 = 25;
 }
 
 /// Maximum capabilities one `spawn` can hand over.
@@ -354,9 +357,52 @@ pub fn dev_map(cap: Cap, bar: usize) -> Result<*mut u8> {
     check(syscall(sys::DEV_MAP, cap.0 as u64, bar as u64, 0, 0)).map(|va| va as *mut u8)
 }
 
-/// Route an interrupt object's events to `ep` as messages `[vector, count]`.
-pub fn irq_bind(irq: Cap, ep: Cap) -> Result<()> {
-    check(syscall(sys::IRQ_BIND, irq.0 as u64, ep.0 as u64, 0, 0)).map(|_| ())
+/// Route an interrupt object to a target: an endpoint receives a message per
+/// interrupt, a notification a signal.
+pub fn irq_bind(irq: Cap, target: Cap) -> Result<()> {
+    check(syscall(sys::IRQ_BIND, irq.0 as u64, target.0 as u64, 0, 0)).map(|_| ())
+}
+
+/// A notification the caller can signal, wait on and hand on.
+pub fn notify_create() -> Result<Cap> {
+    check(syscall(sys::NOTIFY_CREATE, 0, 0, 0, 0)).map(|s| Cap(s as u32))
+}
+
+/// How many signals a wait takes, and whether it sleeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitMode {
+    /// One signal, blocking until there is one.
+    One,
+    /// One signal, or `EAGAIN` if there is none.
+    Poll,
+    /// Every pending signal at once, blocking until there is at least one.
+    All,
+}
+
+/// Take a signal. Returns how many were taken, or `EAGAIN` from a
+/// [`WaitMode::Poll`] with nothing pending.
+///
+/// A signal that arrived before the wait is not lost: it is still there to be
+/// taken, which is the whole point over a queue of messages.
+pub fn notify_wait(cap: Cap, mode: WaitMode) -> Result<u32> {
+    let mode = match mode {
+        WaitMode::One => 0,
+        WaitMode::Poll => 1,
+        WaitMode::All => 2,
+    };
+    check(syscall(sys::NOTIFY_WAIT, cap.0 as u64, mode, 0, 0)).map(|n| n as u32)
+}
+
+/// Record `count` signals. Returns how many waiting tasks were woken.
+pub fn notify_signal(cap: Cap, count: u32) -> Result<usize> {
+    check(syscall(
+        sys::NOTIFY_SIGNAL,
+        cap.0 as u64,
+        count as u64,
+        0,
+        0,
+    ))
+    .map(|n| n as usize)
 }
 
 /// Re-arm a level-triggered interrupt after servicing the device.

@@ -15,6 +15,7 @@ mod console;
 mod ipc;
 mod loader;
 mod mm;
+mod notify;
 mod obj;
 mod sched;
 mod service;
@@ -215,6 +216,24 @@ unsafe extern "C" fn kmain() -> ! {
             "heap leak: {} KiB in use, was {} KiB before the growth test",
             back.in_use / 1024,
             before.in_use / 1024
+        );
+    }
+
+    {
+        let (made, signals, waits, saturated, waiting) = notify::Notify::report();
+        klog!(
+            "notify",
+            "{} object(s), {} signal(s) recorded, {} taken, {} folded into a full counter, {} task(s) waiting now{}",
+            made,
+            signals,
+            waits,
+            saturated,
+            waiting,
+            if saturated > 0 {
+                " (a driver is not taking its signals)"
+            } else {
+                ""
+            }
         );
     }
 

@@ -7,6 +7,7 @@ use x86_64::{PhysAddr, VirtAddr};
 use crate::arch::x86_64::interrupts as irq;
 use crate::ipc::{Endpoint, IpcError, Message};
 use crate::mm::pmm::{FRAME_SIZE, phys_to_virt};
+use crate::notify::{Notify, Wait};
 use crate::obj::{Capability, MemoryObject, Object, Rights};
 use crate::service::Grant;
 use crate::{klog, sched};
@@ -34,6 +35,9 @@ pub const SYS_DEV_IRQ: u64 = 19;
 pub const SYS_PORT_IN: u64 = 20;
 pub const SYS_PORT_OUT: u64 = 21;
 pub const SYS_SPAWN_DESC: u64 = 22;
+pub const SYS_NOTIFY_CREATE: u64 = 23;
+pub const SYS_NOTIFY_WAIT: u64 = 24;
+pub const SYS_NOTIFY_SIGNAL: u64 = 25;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -440,17 +444,89 @@ fn start_service(
 }
 
 /// Deliver an interrupt object's events to `ep_slot` (needs RECV on the irq).
-fn sys_irq_bind(irq_slot: u64, ep_slot: u64) -> i64 {
+/// Bind an interrupt to whatever the driver wants to receive it on.
+///
+/// An endpoint gets a message per interrupt, which is what a driver that has to
+/// know *which* interrupt it was needs. A notification gets a signal, which is
+/// what a driver that only has to drain the device wants: nothing is allocated
+/// on the interrupt path and an interrupt that arrives before the driver is
+/// waiting is not lost.
+fn sys_irq_bind(irq_slot: u64, target_slot: u64) -> i64 {
     let Some(irq_obj) =
         sched::with_current(|t| t.caps.lookup(irq_slot as u32, Rights::RECV)?.irq().cloned())
     else {
         return EPERM;
     };
-    let Some(ep) = lookup_endpoint(ep_slot, Rights::SEND) else {
+    enum Target {
+        Endpoint(Arc<Endpoint>),
+        Notify(Arc<Notify>),
+    }
+    let target = sched::with_current(|t| {
+        let cap = t.caps.get(target_slot as u32)?;
+        match &cap.object {
+            Object::Endpoint(ep) if cap.rights.contains(Rights::SEND) => {
+                Some(Target::Endpoint(ep.clone()))
+            }
+            // Receiving a signal is the driver's side of the deal; signalling it
+            // is the kernel's, so `WAIT` is all that is asked for.
+            Object::Notify(n) if cap.rights.contains(Rights::WAIT) => {
+                Some(Target::Notify(n.clone()))
+            }
+            _ => None,
+        }
+    });
+    let Some(target) = target else {
         return EPERM;
     };
-    irq_obj.bind(ep);
+    match target {
+        Target::Endpoint(ep) => irq_obj.bind(ep),
+        Target::Notify(n) => irq_obj.bind_notify(n),
+    }
     0
+}
+
+/// A notification the caller owns: it can signal it, wait on it and hand it on.
+fn sys_notify_create() -> i64 {
+    insert_cap(Capability {
+        object: Object::Notify(Notify::new()),
+        rights: Rights::SIGNAL.union(Rights::WAIT).union(Rights::GRANT),
+    })
+}
+
+/// `mode` is 0 for one signal (blocking), 1 for one signal without blocking,
+/// 2 for every pending signal. Returns how many signals were taken.
+fn sys_notify_wait(slot: u64, mode: u64) -> i64 {
+    let mode = match mode {
+        0 => Wait::One,
+        1 => Wait::Poll,
+        2 => Wait::All,
+        _ => return EINVAL,
+    };
+    let Some(notify) =
+        sched::with_current(|t| t.caps.lookup(slot as u32, Rights::WAIT)?.notify().cloned())
+    else {
+        return EPERM;
+    };
+    match notify.wait(mode) {
+        Some(taken) => taken as i64,
+        None => EAGAIN,
+    }
+}
+
+/// Record `count` signals. Returns how many waiting tasks were woken.
+fn sys_notify_signal(slot: u64, count: u64) -> i64 {
+    let Some(notify) = sched::with_current(|t| {
+        t.caps
+            .lookup(slot as u32, Rights::SIGNAL)?
+            .notify()
+            .cloned()
+    }) else {
+        return EPERM;
+    };
+    if count == 0 {
+        return EINVAL;
+    }
+    notify.signal(count.min(u32::MAX as u64) as u32) as i64
 }
 
 fn sys_irq_ack(irq_slot: u64) -> i64 {
@@ -556,6 +632,9 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_DEV_INFO => sys_dev_info(a0, a1),
         SYS_DEV_MAP => sys_dev_map(a0, a1),
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
+        SYS_NOTIFY_CREATE => sys_notify_create(),
+        SYS_NOTIFY_WAIT => sys_notify_wait(a0, a1),
+        SYS_NOTIFY_SIGNAL => sys_notify_signal(a0, a1),
         SYS_SPAWN_DESC => sys_spawn_desc(a0),
         SYS_IRQ_BIND => sys_irq_bind(a0, a1),
         SYS_IRQ_ACK => sys_irq_ack(a0),

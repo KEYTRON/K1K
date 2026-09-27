@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "notify"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "k1k-rt",
+]
+
+[[package]]
 name = "ping"
 version = "1.0.0-alpha.1"
 dependencies = [

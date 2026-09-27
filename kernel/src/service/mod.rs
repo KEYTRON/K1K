@@ -20,6 +20,7 @@ use crate::mm::vmm::{
     AddressSpace, BOOT_INFO_LAYOUT, BOOT_INFO_MAGIC, BootInfo, Flags, MAX_BOOT_ARGS,
     USER_HEAP_BASE, USER_HEAP_PAGES, USER_INFO_BASE, USER_STACK_TOP,
 };
+use crate::notify::Notify;
 use crate::obj::{Capability, DeviceObject, Object, PortRange, Rights};
 use crate::sched::{self, UserEntry, task::Task};
 
@@ -81,6 +82,7 @@ macro_rules! image {
 static PING: &[u8] = image!("ping");
 static PONG: &[u8] = image!("pong");
 static KBD: &[u8] = image!("kbd");
+static NOTIFY: &[u8] = image!("notify");
 static BLK: &[u8] = image!("blk");
 static FS: &[u8] = image!("fs");
 
@@ -116,6 +118,27 @@ pub fn init_builtin() {
             Grant {
                 object: Object::Port(PortRange { base: 0x60, len: 5 }),
                 rights: Rights::MAP_READ,
+            },
+        ],
+        dynamic: false,
+        args: b"",
+    });
+
+    // Notification semantics: slot 0 may signal and wait, slot 1 may only wait,
+    // and both are the same object. The service checks that the two rights are
+    // really separate, which is the reason they are.
+    let shared = Notify::new();
+    register(ServiceSpec {
+        name: "notify",
+        image: NOTIFY,
+        grants: alloc::vec![
+            Grant {
+                object: Object::Notify(shared.clone()),
+                rights: Rights::SIGNAL.union(Rights::WAIT),
+            },
+            Grant {
+                object: Object::Notify(shared),
+                rights: Rights::WAIT,
             },
         ],
         dynamic: false,

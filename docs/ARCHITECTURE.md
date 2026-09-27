@@ -184,8 +184,9 @@ handler wakes sleepers without allocating.
 
 ```
 Task ── CapTable ── [slot] ── Capability { object, rights }
-                                 object: Endpoint | Memory | Device | Irq | Port | Control
-                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE | DMA | SPAWN
+                                 object: Endpoint | Notify | Memory | Device | Irq | Port | Control
+                                 rights: SEND | RECV | GRANT | MAP_READ | MAP_WRITE | DMA
+                                         | SPAWN | SIGNAL | WAIT
 ```
 
 `Endpoint` (`ipc/mod.rs`) is a synchronous message channel carrying
@@ -193,6 +194,22 @@ Task ── CapTable ── [slot] ── Capability { object, rights }
 on the endpoint the message is written straight into its inbox and it is
 woken; otherwise it is queued (bounded, `EAGAIN` when full). `recv` blocks
 until a message arrives.
+
+`Notify` (`notify.rs`) is the asynchronous half: a counter of things that
+happened, with tasks waiting for the next one. It exists because an endpoint is
+the wrong shape for "the device did a thing". A message has to be allocated,
+queued and freed on a path that cannot afford it, and a queue that is full loses
+the event silently — which is what the `dropped` counter on an interrupt object
+was apologising for. A notification has no payload to lose: `signal(n)` records
+`n` and wakes up to `n` waiters, and a waiter takes signals off the counter
+whenever it gets round to it, so an event that arrives before the wait is still
+there afterwards. `wait` comes in three shapes — one signal (`One`, blocking),
+one signal or `EAGAIN` (`Poll`), and every pending signal at once (`All`, which
+is what a driver that is going to drain the device anyway wants: one wake-up for
+whatever number of completions arrived). `SIGNAL` and `WAIT` are separate
+rights, so the waiting half of a relationship can be handed out without the
+other; the `notify` service is handed two capabilities on one object and checks
+exactly that.
 
 A message may carry one capability (`send_cap`). The sender must hold `GRANT`
 on it; the copy the receiver gets is `rights ∩ mask` and is inserted into the
@@ -218,10 +235,14 @@ pages so teardown never tries to free MMIO "frames".
 `IrqObject` (`arch/x86_64/irq.rs`) stands for one interrupt vector: either a
 legacy ISA line routed through the I/O APIC (`irq::isa`) or a PCI function's
 MSI-X entry 0 pointed at a fresh vector (`irq::msix`, obtained by a driver
-with `dev_irq`). `irq_bind` attaches an endpoint; every interrupt then becomes
-a message `[vector, count]` on it, sent from the trap path after the APIC EOI.
-Level-triggered lines are masked at the I/O APIC until the driver calls
-`irq_ack`. `Port` capabilities grant a range of x86 I/O ports for
+with `dev_irq`). `irq_bind` attaches a target, and which kind it is decides
+what an interrupt becomes: an **endpoint** gets a message `[vector, count]`,
+which is what a driver that has to know *which* interrupt it was needs, while a
+**notification** gets a signal, which is what a driver that only has to drain
+the device wants — nothing is allocated on the interrupt path and an interrupt
+that arrives before the driver is waiting is not lost. Both are sent from the
+trap path after the APIC EOI. Level-triggered lines are masked at the I/O APIC
+until the driver calls `irq_ack`. `Port` capabilities grant a range of x86 I/O ports for
 `port_in`/`port_out` (the 8042 keyboard controller lives at `0x60..0x64`).
 
 `Control` is the kernel's own authority object; a capability to it with
@@ -418,12 +439,15 @@ wrappers in `user/rt` (`k1k-rt`).
 | 14 | `dev_info` | `slot, buf[14×u64]` | 0, `EPERM`, `EFAULT` |
 | 15 | `dev_map` | `slot, bar` | base address, `EPERM`, `EINVAL`, `ENOMEM` |
 | 16 | `spawn` | `ctl_slot, mem_slot, size, name_ptr \| len<<48` | new task id, `EPERM`, `EINVAL`, `EFAULT` |
-| 17 | `irq_bind` | `irq_slot, ep_slot` | 0, `EPERM` |
+| 17 | `irq_bind` | `irq_slot, target_slot` (endpoint or notification) | 0, `EPERM` |
 | 18 | `irq_ack` | `irq_slot` | 0, `EPERM` |
 | 19 | `dev_irq` | `dev_slot` | new irq slot (`RECV|GRANT`), `EPERM`, `EINVAL` |
 | 20 | `port_in` | `port_slot, offset, width` | value, `EPERM`, `EINVAL` |
 | 21 | `port_out` | `port_slot, offset, width, value` | 0, `EPERM`, `EINVAL` |
 | 22 | `spawn_desc` | `ptr` to the descriptor above (≤ 8 grants, ≤ 1024 argument bytes) | new task id, `EPERM`, `EINVAL`, `EFAULT` |
+| 23 | `notify_create` | — | new slot (`SIGNAL|WAIT|GRANT`), `ENOMEM` |
+| 24 | `notify_wait` | `slot, mode` (0 one, 1 poll, 2 all) | signals taken, `EAGAIN` from a poll, `EPERM`, `EINVAL` |
+| 25 | `notify_signal` | `slot, count` | waiters woken, `EPERM`, `EINVAL` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

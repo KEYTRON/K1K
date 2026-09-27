@@ -107,6 +107,8 @@ test: test-iso $(DISK)
 	status=$$?; cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
 	test $$status -eq 33 \
 		&& grep -q 'fs\] mounted' $(BUILD)/serial.log \
+		&& grep -q 'notify\] notification semantics ok' $(BUILD)/serial.log \
+		&& grep -q 'kbd\] keyboard driver online (ring 3, IRQ 1 via notification)' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \
 		&& grep -q 'fs\] serving files' $(BUILD)/serial.log \
