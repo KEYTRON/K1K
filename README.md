@@ -155,14 +155,23 @@ a FAT volume.
   with a compare-and-swap on every move, so a scheduler that put one task in two
   places would say so at the move that did it instead of letting two CPUs run it
   on one stack.
-- Three rules the scheduler keeps, each of which is a bug it used to have: waking
-  a task that is still on another CPU leaves it to that CPU, which notices on the
-  way out that the task is Ready and puts it back; nothing that can wait for
-  another CPU runs under a lock, so a task is built before the table is locked
-  and every lock is taken with interrupts off; and a task is never switched away
-  from inside an interrupt taken while it was in user code, because the saved
-  stack pointer would land in the middle of the trap frame — that tick waits for
-  the task's next syscall, which is ordinary kernel code.
+- Four rules the scheduler keeps, and what each one is worth. Waking a task that
+  is still on another CPU leaves it to that CPU, which notices on the way out that
+  the task is Ready and puts it back: queueing it from the waker as well is how a
+  task ends up in two queues and gets run by two CPUs on one stack, and taking
+  that rule away makes the placement check fire within seconds. Nothing that can
+  wait for another CPU runs under a lock — a task is built before the table is
+  locked, because a heap that grows announces its new pages and waits for the
+  other CPUs to acknowledge — and every lock is taken with interrupts off, so a
+  handler on this CPU cannot end up waiting for a lock its own thread holds. A
+  task is not switched away from inside an interrupt taken while it was in user
+  code, because the saved stack pointer would land in the middle of the trap
+  frame; that tick waits for the task's next syscall instead, and about 20 of them
+  do so in an eight-second run. The tick handler allocates nothing, sweeping the
+  sleeper list in place instead: an allocation there is enough to make a run fail.
+  The last three are hazards the single-queue scheduler had too and never hit at
+  four processors — one global queue serialises exactly the races that make them
+  matter — so they are argued from the code rather than from a reproduction.
 - One allocator for both: the kernel heap and the service heaps are the same
   `k1k-alloc` crate. The kernel heap starts with nothing mapped and takes
   mebibytes from the physical allocator as it needs them, announces the new
