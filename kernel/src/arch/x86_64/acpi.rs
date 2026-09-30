@@ -26,7 +26,11 @@ pub struct IrqOverride {
 #[derive(Debug, Default)]
 pub struct Madt {
     pub lapic_address: u64,
-    pub cpus: Vec<(u8, u8)>, // (acpi processor id, apic id) — enabled only
+    /// `(acpi processor id, local apic id)` for every enabled processor. Both
+    /// are 32 bits: a processor local x2APIC id (MADT entry type 9) does not
+    /// fit in a byte, and that is exactly the case a machine with more than 255
+    /// logical processors is described with.
+    pub cpus: Vec<(u32, u32)>,
     pub ioapics: Vec<IoApicInfo>,
     pub overrides: Vec<IrqOverride>,
     pub has_legacy_pics: bool,
@@ -172,8 +176,16 @@ fn parse_madt(t: &[u8], out: &mut Madt) {
         let e = &t[off..off + len];
         match kind {
             0 if len >= 8 => {
+                // Type 0: eight-bit apic id, flags at offset 4.
                 if u32_at(e, 4) & 1 != 0 {
-                    out.cpus.push((e[2], e[3]));
+                    out.cpus.push((e[2] as u32, e[3] as u32));
+                }
+            }
+            9 if len >= 16 => {
+                // Type 9: a processor local x2APIC id, four bytes, flags at 8.
+                let id = u32_at(e, 4);
+                if u32_at(e, 8) & 1 != 0 {
+                    out.cpus.push((u32_at(e, 12), id));
                 }
             }
             1 if len >= 12 => out.ioapics.push(IoApicInfo {

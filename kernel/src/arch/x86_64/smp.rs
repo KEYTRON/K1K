@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::mp::MpInfo;
 
-use super::{gdt, idt, interrupts, percpu, syscall};
+use super::{acpi, gdt, idt, interrupts, percpu, syscall};
 use crate::{boot, klog, sched};
 
 static APS_ONLINE: AtomicUsize = AtomicUsize::new(0);
@@ -18,6 +18,23 @@ pub fn start_aps() {
     let bsp = resp.bsp_lapic_id;
     let cpus = resp.cpus();
     klog!("smp", "{} cpu(s) reported, bsp lapic {}", cpus.len(), bsp);
+
+    // What the firmware describes and what can actually be started are not the
+    // same list. A machine with more than 255 logical processors is described
+    // with MADT entries that carry 32-bit x2APIC ids, while the MP tables the
+    // bootloader hands over name processors with eight-bit ones, so the extra
+    // processors are visible in ACPI and unreachable through this path. Saying
+    // so, with both numbers, is better than starting 255 of 256 quietly.
+    let described = acpi::madt().cpus.len();
+    let startable = cpus.len();
+    if described > startable {
+        klog!(
+            "smp",
+            "WARNING: ACPI describes {described} logical processor(s) but {startable} can be \
+             started: ids past 255 need the x2apic startup protocol, which this kernel does \
+             not do yet"
+        );
+    }
 
     let mut next_id = 1u32;
     for info in cpus {

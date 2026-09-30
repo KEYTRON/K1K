@@ -1,6 +1,6 @@
 //! Local APIC (timer, EOI) and I/O APIC (IRQ routing).
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use x86_64::PhysAddr;
 
 use super::{acpi, pit};
@@ -35,8 +35,12 @@ const DIV_16: u32 = 0b0011;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
-static BSP_LAPIC_ID: AtomicU8 = AtomicU8::new(0);
+static BSP_LAPIC_ID: AtomicU32 = AtomicU32::new(0);
 static TICKS_PER_MS: AtomicU32 = AtomicU32::new(0);
+/// Set once a processor has told us it is running with the extended APIC. The
+/// register map is the same; only the way in differs, because a 32-bit
+/// processor id has nowhere to go in a memory-mapped window.
+static X2APIC: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn lapic_read(reg: u32) -> u32 {
@@ -50,8 +54,47 @@ fn lapic_write(reg: u32, v: u32) {
     unsafe { ((base + reg as u64) as *mut u32).write_volatile(v) }
 }
 
-pub fn lapic_id() -> u8 {
-    (lapic_read(LAPIC_ID) >> 24) as u8
+/// The x2APIC register map, which is the only way to reach an id that does not
+/// fit in eight bits.
+const X2APIC_ID: u32 = 0x808;
+const X2APIC_EOI: u32 = 0x80B;
+const X2APIC_ICR: u32 = 0x80D;
+
+#[inline]
+fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        core::arch::asm!("rdmsr", out("eax") lo, out("edx") hi, in("ecx") msr, options(nomem, nostack, preserves_flags));
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
+#[inline]
+fn wrmsr(msr: u32, val: u64) {
+    let lo = val as u32;
+    let hi = (val >> 32) as u32;
+    unsafe {
+        core::arch::asm!("wrmsr", in("ecx") msr, in("eax") lo, in("edx") hi, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Whether this processor is using the extended APIC.
+pub fn x2apic() -> bool {
+    X2APIC.load(Ordering::Relaxed)
+}
+
+/// The calling processor's local APIC id, all 32 bits of it.
+///
+/// A 256-core socket cannot be described by eight-bit ids at all — that is the
+/// whole reason the firmware switches to the x2APIC forms of these registers,
+/// and the reason MADT entry type 9 exists. A kernel that only reads the memory
+/// window sees the same 0xff for the 256th processor as for a broken one.
+pub fn lapic_id() -> u32 {
+    if x2apic() {
+        rdmsr(X2APIC_ID) as u32
+    } else {
+        lapic_read(LAPIC_ID) >> 24
+    }
 }
 
 /// Broadcast `vector` to every other processor, reporting whether the APIC
@@ -69,17 +112,33 @@ pub fn lapic_id() -> u8 {
 /// would block the sender for reasons that have nothing to do with the
 /// interrupt. Waiting for the acknowledgement is the real synchronisation.
 pub fn send_broadcast_ipi(vector: u8) -> bool {
-    if lapic_read(LAPIC_ICR) & ICR_BUSY != 0 {
-        return false;
-    }
     const LOGICAL: u32 = 1 << 11;
     const ALL_BUT_SELF: u32 = 2 << 18;
-    lapic_write(LAPIC_ICR, LOGICAL | ALL_BUT_SELF | vector as u32);
-    true
+    let cmd = (LOGICAL | ALL_BUT_SELF | vector as u32) as u64;
+    if x2apic() {
+        // The delivery-status bit lives in the low half of the MSR, and with
+        // interrupts off it stays set for as long as the target is busy, so this
+        // is only ever a refusal to pile on, never a wait.
+        if rdmsr(X2APIC_ICR) & (ICR_BUSY as u64) != 0 {
+            return false;
+        }
+        wrmsr(X2APIC_ICR, cmd);
+        true
+    } else {
+        if lapic_read(LAPIC_ICR) & ICR_BUSY != 0 {
+            return false;
+        }
+        lapic_write(LAPIC_ICR, cmd as u32);
+        true
+    }
 }
 
 pub fn eoi() {
-    lapic_write(LAPIC_EOI, 0);
+    if x2apic() {
+        wrmsr(X2APIC_EOI, 0);
+    } else {
+        lapic_write(LAPIC_EOI, 0);
+    }
 }
 
 fn mmio(phys: u64, len: u64) -> u64 {
@@ -88,20 +147,49 @@ fn mmio(phys: u64, len: u64) -> u64 {
 }
 
 /// `IA32_APIC_BASE`: bit 8 "is bootstrap processor", bit 10 "APIC global
-/// enable". The MP startup procedure has every application processor enable
-/// its own local APIC here; a processor whose APIC is not enabled receives no
-/// interrupts at all, IPIs included.
+/// enable", bit 11 "x2APIC enable". The MP startup procedure has every
+/// application processor enable its own local APIC here; a processor whose
+/// APIC is not enabled receives no interrupts at all, IPIs included. Bit 11 is
+/// what a processor sets when there are more logical processors than an
+/// eight-bit id can name, and it is why the id and the interrupt command have to
+/// be read and written through MSRs from then on.
 const IA32_APIC_BASE: u32 = 0x1B;
 const APIC_BASE_ENABLE: u64 = 1 << 10;
 const APIC_BASE_BSP: u64 = 1 << 8;
+const APIC_BASE_X2APIC: u64 = 1 << 11;
 
 /// Software-enable the calling CPU's local APIC with the timer masked.
 ///
 /// The IPI vector has to be unmasked explicitly: an LVT entry that was never
 /// written is masked, and a masked vector drops the interrupt instead of
 /// delivering it — which would make every TLB shootdown silently do nothing.
+/// Whether the processor says it implements the x2APIC MSRs.
+///
+/// `IA32_APIC_BASE` saying "x2APIC enabled" is not enough to go and read them:
+/// a hypervisor can advertise it in a way the kernel cannot use, and `rdmsr` of
+/// a missing MSR is a #GP that arrives with no way to recover — in the middle
+/// of bringing the interrupt controller up. CPUID's word for the feature is the
+/// one worth believing, and when it is absent the memory-mapped window is used,
+/// which is all a machine with at most 255 processor ids needs.
+fn x2apic_supported() -> bool {
+    let leaf = core::arch::x86_64::__cpuid(1);
+    leaf.edx & (1 << 21) != 0
+}
+
 pub fn enable_local() {
     let _ = (APIC_BASE_ENABLE, APIC_BASE_BSP, IA32_APIC_BASE);
+    let base = rdmsr(IA32_APIC_BASE);
+    let supported = x2apic_supported();
+    if supported && base & APIC_BASE_X2APIC != 0 {
+        X2APIC.store(true, Ordering::Relaxed);
+        klog!("apic", "cpu {} is using the x2apic", lapic_id());
+    } else if base & APIC_BASE_X2APIC != 0 {
+        klog!(
+            "apic",
+            "IA32_APIC_BASE claims x2apic but this processor does not report the feature: \
+             using the memory-mapped window"
+        );
+    }
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR as u32);
     lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
@@ -224,7 +312,11 @@ pub fn route_isa_irq(irq: u8, vector: u8) -> IsaRoute {
     if level {
         low |= 1 << 15;
     }
-    let dest = (bsp_lapic_id() as u32) << 24;
+    // An I/O APIC redirect carries an eight-bit destination, so with the
+    // extended APIC the legacy path is the *compatibility* id — the same number
+    // the memory-mapped window shows. Anything wider than 255 does not come
+    // through here at all, which is one of the things the ceiling costs.
+    let dest = (bsp_lapic_id() & 0xFF) << 24;
     let io = ioapic_for(gsi);
     io.set_redirect(gsi - io.gsi_base, low, dest);
     klog!(
@@ -253,6 +345,6 @@ pub fn set_gsi_mask(gsi: u32, masked: bool) {
     );
 }
 
-pub fn bsp_lapic_id() -> u8 {
+pub fn bsp_lapic_id() -> u32 {
     BSP_LAPIC_ID.load(Ordering::Relaxed)
 }

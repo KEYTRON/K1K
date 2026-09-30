@@ -101,7 +101,15 @@ pub fn msix(dev: &pci::PciDevice) -> Option<Arc<IrqObject>> {
     if vector > MSI_VECTOR_LAST {
         return None;
     }
-    pci::msix_enable(dev, 0, vector, apic::bsp_lapic_id())?;
+    let target = apic::bsp_lapic_id();
+    if target > 0xFF {
+        klog!(
+            "irq",
+            "WARNING: this processor is lapic {target}, and MSI-X only names 255 of them; \
+             the device would deliver to processor 0 instead"
+        );
+    }
+    pci::msix_enable(dev, 0, vector, target)?;
     let obj = Arc::new(IrqObject {
         vector,
         gsi: None,

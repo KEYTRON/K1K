@@ -12,7 +12,16 @@ use x86_64::structures::tss::TaskStateSegment;
 
 use crate::sched::task::TaskId;
 
-pub const MAX_CPUS: usize = 64;
+/// Logical processors one socket can hold.
+///
+/// The ceiling taken for the kernel: the biggest x86 part available today has 256
+/// cores and 512 threads (AMD EPYC 9996, Venice), so anything smaller is a cap
+/// the hardware cannot justify. What is actually *usable* at this size is a
+/// separate question, and a separate line in the roadmap: the local apic id
+/// becomes 32 bits, the firmware describes those processors with MADT entry
+/// type 9, and starting them needs a wake-up sequence this kernel does not yet
+/// do. Under QEMU the tests run with a handful.
+pub const MAX_CPUS: usize = 512;
 pub const NO_TASK: TaskId = u32::MAX;
 
 /// Offsets used by the syscall entry stub (`syscall.rs`).

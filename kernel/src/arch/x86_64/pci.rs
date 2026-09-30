@@ -233,7 +233,11 @@ fn find_capability(d: &PciDevice, id: u8) -> Option<u8> {
 
 /// Point MSI-X table entry `index` at `vector` on `lapic_id` and enable MSI-X.
 /// The table lives in one of the function's BARs, reached through the HHDM.
-pub fn msix_enable(d: &PciDevice, index: u32, vector: u8, lapic_id: u8) -> Option<()> {
+/// `lapic_id` is a full local APIC id. MSI-X has eight bits for the
+/// destination, so a processor whose id does not fit in eight bits cannot be
+/// addressed by this route; that is reported rather than silently truncated,
+/// because a vector delivered to the wrong processor is worse than none.
+pub fn msix_enable(d: &PciDevice, index: u32, vector: u8, lapic_id: u32) -> Option<()> {
     let cap = find_capability(d, 0x11)?;
     let ctrl = read16(d, cap + 2);
     let table_size = (ctrl & 0x7FF) as u32 + 1;
@@ -254,7 +258,7 @@ pub fn msix_enable(d: &PciDevice, index: u32, vector: u8, lapic_id: u8) -> Optio
     unsafe {
         entry
             .add(0)
-            .write_volatile(0xFEE0_0000 | (lapic_id as u32) << 12);
+            .write_volatile(0xFEE0_0000 | (lapic_id & 0xFF) << 12);
         entry.add(1).write_volatile(0);
         entry.add(2).write_volatile(vector as u32);
         entry.add(3).write_volatile(0); // unmasked
