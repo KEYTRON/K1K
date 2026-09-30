@@ -156,6 +156,17 @@ a FAT volume.
   redirect and an MSI-X entry both have eight bits for the destination. Both are
   on the roadmap with the reasons, and the kernel logs the gap when it sees it
   rather than working around it quietly.
+- Waiting for the other processors with interrupts **on**: a TLB shootdown has to
+  ask every CPU to invalidate something and wait for it to say it has, and a CPU
+  that waits with interrupts off cannot take the interrupt that clears its own
+  APIC's delivery-status bit — so one long wait leaves the APIC busy, the next
+  shootdown cannot be handed to it at all, and a CPU spinning like that can
+  neither answer anybody else's request nor sweep its own sleepers. One slow
+  flush becomes a machine-wide one, and the growing heap needs one on every boot,
+  several times in a row, with every processor already running. While waiting,
+  a CPU keeps sweeping its sleepers and can answer a peer, and once the peers
+  have had their chance it halts until the tick that arrives anyway rather than
+  holding a host core that the processor it waits for has not been given.
 - One run queue per CPU: the scheduler gives every processor its own ready queue
   and its own list of sleeping tasks, so a switch from one task to the next does
   not go through a lock the whole machine shares; a CPU with nothing to do takes
