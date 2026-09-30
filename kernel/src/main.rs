@@ -305,7 +305,11 @@ extern "C" fn kmain() -> ! {
                 );
                 auxed += 1;
             }
-            let ns = (sample / hz) * 1_000_000_000 + (sample % hz) * 1_000_000_000 / hz;
+            // In 128 bits: a raw counter divided by a rate that is not really a
+            // rate can be a very large number of seconds, and this is a machine
+            // that has just been told the counter is not to be trusted.
+            let ns = ((sample / hz) as u128 * 1_000_000_000
+                + (sample % hz) as u128 * 1_000_000_000 / hz as u128) as u64;
             match baseline {
                 None => baseline = Some(ns),
                 Some(base) => {

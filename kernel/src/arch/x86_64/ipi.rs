@@ -36,10 +36,16 @@ use crate::mm::pmm::FRAME_SIZE;
 /// firmware is entitled to treat that block as special.
 pub const IPI_VECTOR: u8 = 0x21;
 
-/// How long to wait for the peers, in iterations. A CPU inside a long
-/// interrupts-off section delays its answer rather than losing it, so this only
-/// has to outlast the longest such section.
+/// How long to wait for the peers before giving up on them.
+///
+/// An iteration is not a time. Under emulation, with more guest processors than
+/// the host has cores, eight million of them is seconds during which this CPU
+/// neither sleeps nor takes an interrupt — and a peer the host has not scheduled
+/// yet needs about that long to come and say it has flushed.
 const ACK_SPINS: u32 = 8_000_000;
+
+/// Spins before the wait starts halting instead of spinning.
+const SPIN_BEFORE_HALT: u32 = 4_096;
 
 /// A request together with the number its sender is waiting for.
 #[derive(Clone, Copy)]
@@ -56,8 +62,6 @@ pub enum Request {
     /// Invalidate a range of the shared kernel half, which is present in every
     /// address space and therefore flushed regardless of the loaded CR3.
     SharedRange { start: u64, end: u64 },
-    /// Come back to the scheduler: there is work to pick up.
-    Resched,
     /// Answer and do nothing else; used by [`selftest`].
     Ping,
 }
@@ -68,8 +72,31 @@ pub enum Request {
 static BROADCAST_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 /// Publish `req` to every CPU but this one, send the IPI, and wait for all of
-/// them. Must be called with interrupts already disabled, so the CPU the caller
-/// is on cannot change underneath the bookkeeping.
+/// them.
+///
+/// Interrupts stay **on** for the whole of this, and that is the point rather
+/// than a detail.
+///
+/// A CPU that waits with interrupts off cannot take the interrupt that clears
+/// its own APIC's delivery-status bit, so one long wait leaves the APIC busy:
+/// the next shootdown this CPU wants to send cannot be handed to the APIC at
+/// all, because `send_broadcast_ipi` will not queue a second command behind one
+/// that has not been taken. Nor can this CPU answer anybody else's shootdown
+/// while it spins. So a single slow flush turns into a machine-wide one, and
+/// the kernel stops being able to bring its own new pages to the other
+/// processors — which is what a growing heap needs, several times in a row, on
+/// every boot.
+///
+/// With interrupts on, this CPU keeps sweeping its sleepers, keeps running its
+/// own tasks, can answer a peer's shootdown while it waits, and — once the peers
+/// have had their chance — can halt until the tick that arrives anyway, rather
+/// than occupying a host core the peer it is waiting for has not been given.
+///
+/// The bookkeeping does not need interrupts off. Every shared slot is behind its
+/// own lock and the sequence numbers are atomics, so an interrupt landing in the
+/// middle of publishing cannot be seen half-done by the other side: the reader
+/// either takes the whole request or none of it, and the sender's own view of
+/// what it is waiting for does not change under it.
 fn broadcast_and_wait(req: Request) -> bool {
     let _guard = BROADCAST_LOCK.lock();
     let me = percpu::cpu_id();
@@ -98,7 +125,8 @@ fn broadcast_and_wait(req: Request) -> bool {
         // taken yet. Wait for it rather than dropping this one.
         core::hint::spin_loop();
     }
-    for _ in 0..ACK_SPINS {
+    let mut spins = 0u32;
+    loop {
         if targets
             .iter()
             .flatten()
@@ -106,17 +134,30 @@ fn broadcast_and_wait(req: Request) -> bool {
         {
             return true;
         }
-        core::hint::spin_loop();
+        spins += 1;
+        if spins > ACK_SPINS {
+            return false;
+        }
+        if spins < SPIN_BEFORE_HALT || !interrupts::are_enabled() {
+            // Before the interrupts are on — the boot-time self-test runs before
+            // that — halting here would be halting with nothing to wake it.
+            core::hint::spin_loop();
+        } else {
+            x86_64::instructions::hlt();
+        }
     }
-    false
 }
 
 /// The IPI entry point: do whatever this CPU was asked to do.
 pub fn on_ipi() {
     let pc = percpu::get();
-    // The slot is written by the sender with its own interrupts off, and read
-    // here with the reader's: a lock held across an interrupt on the same CPU
-    // would wait for itself.
+    // A reschedule is a flag, not an entry in the work slot, and it is taken
+    // before the slot: the work in the slot is the thing its sender is waiting
+    // to have acknowledged.
+    let resched = pc.resched.swap(false, Ordering::AcqRel);
+    // The slot is written by the sender under its own lock, and read here under
+    // the reader's: a lock held across an interrupt on the same CPU would wait
+    // for itself.
     let pending = interrupts::without_interrupts(|| pc.ipi_slot.lock().take());
     match pending {
         Some(Pending {
@@ -135,25 +176,18 @@ pub fn on_ipi() {
         }
         Some(Pending {
             seq,
-            req: Request::Resched,
-        }) => {
-            pc.resched.store(true, Ordering::Release);
-            pc.ipi_done.store(seq, Ordering::Release);
-            // Only where returning is an ordinary `ret`; see
-            // `sched::may_switch_here`. Otherwise the request waits for this CPU's
-            // next syscall, which is where it is acted on.
-            if crate::sched::may_switch_here() {
-                crate::sched::schedule();
-            }
-        }
-        Some(Pending {
-            seq,
             req: Request::Ping,
         }) => {
             pc.ipi_done.store(seq, Ordering::Release);
         }
         // Nothing pending: a duplicate, or a request already taken.
         None => {}
+    }
+    // Only where returning is an ordinary `ret`; see `sched::may_switch_here`.
+    // Otherwise the request waits for this CPU's next syscall, which is where
+    // it is acted on.
+    if resched && crate::sched::may_switch_here() {
+        crate::sched::schedule();
     }
     apic::eoi();
 }
@@ -185,37 +219,37 @@ fn flush_cr3(cr3: u64) {
 /// those entries: they have to be invalidated by hand wherever they changed.
 pub fn flush_shared_range(start: VirtAddr, end: VirtAddr) {
     let (start, end) = (start.as_u64(), end.as_u64());
-    interrupts::without_interrupts(|| {
-        flush_pages(start, end);
-        if !broadcast_and_wait(Request::SharedRange { start, end }) {
-            klog!("smp", "not every CPU acknowledged a kernel-half flush");
-        }
-    });
+    flush_pages(start, end);
+    if !broadcast_and_wait(Request::SharedRange { start, end }) {
+        klog!("smp", "not every CPU acknowledged a kernel-half flush");
+    }
 }
 
 /// Drop `cr3` from every CPU's TLB. Call before the page tables it points at
 /// are freed or handed to somebody else.
 pub fn shootdown_all(cr3: PhysAddr) {
-    interrupts::without_interrupts(|| {
-        flush_cr3(cr3.as_u64());
-        if !broadcast_and_wait(Request::TlbAll { cr3: cr3.as_u64() }) {
-            klog!("smp", "not every CPU acknowledged a TLB flush");
-        }
-    });
+    flush_cr3(cr3.as_u64());
+    if !broadcast_and_wait(Request::TlbAll { cr3: cr3.as_u64() }) {
+        klog!("smp", "not every CPU acknowledged a TLB flush");
+    }
 }
 
 /// Nudge one CPU to come back to the scheduler. Fire and forget: the target may
 /// still be inside a critical section, and by the time it looks there may be
 /// nothing left to do.
 pub fn kick(cpu: usize) {
+    // A reschedule is a *flag*, not an entry in the work slot. The slot holds
+    // one request at a time, and what is in it is a shootdown its sender is
+    // waiting to have acknowledged: a hint that only wants a CPU to look at its
+    // run queue has no business taking that request's place, and no business
+    // taking the lock that serialises them either — this runs on the path that
+    // wakes a task.
+    //
+    // Swapping rather than storing means a CPU that has already been asked is
+    // not asked again, so a run of wakes cannot turn into a run of IPIs.
     if let Some(pc) = percpu::by_id(cpu)
-        && (pc.current == pc.idle_task || pc.resched.load(Ordering::Relaxed))
+        && (pc.current == pc.idle_task || !pc.resched.swap(true, Ordering::AcqRel))
     {
-        let seq = pc.ipi_seq.fetch_add(1, Ordering::AcqRel) + 1;
-        *pc.ipi_slot.lock() = Some(Pending {
-            seq,
-            req: Request::Resched,
-        });
         apic::send_broadcast_ipi(IPI_VECTOR);
     }
 }
