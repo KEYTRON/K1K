@@ -87,6 +87,23 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [ ] Networking
 - [ ] NVIDIA GPU driver as a ring-3 service on top of the GSP firmware (after the nova driver in Linux), delivered by WARP
 
+## Scale
+- [x] A ceiling worth the name: arrays sized for 512 logical processors (the
+  largest x86 part available has 256 cores and 512 threads), 32-bit apic ids end
+  to end, MADT entry type 9 parsed, and the id and interrupt command through the
+  x2APIC MSRs when the CPU reports the feature. Verified at 4, 8 and 16
+  processors under QEMU and on the host's own processor under KVM
+- [ ] More than 255 logical processors actually starting: the bootloader's
+  processor tables name processors with eight-bit ids, so the wake-up needs to
+  be done by hand (write the 32-bit id, INIT, two SIPIs) and validated on a
+  socket that has one
+- [ ] Interrupts addressed to a processor past 255: I/O APIC redirects and
+  MSI-X entries have eight bits for the destination, so those ids need either
+  the compatibility path spelled out or a different delivery route
+- [ ] Boot at that size: starting 511 processors one INIT/SIPI at a time takes
+  minutes, a per-CPU 32 KiB double-fault stack is 16 MiB of address space, and
+  every TLB shootdown waits on 512 acknowledgements
+
 ## Other architectures
 K1K runs only on x86_64 today: all platform code (GDT/IDT, APIC, ACPI) is written for it.
 - [ ] An `arch/` layer separated from the common kernel code

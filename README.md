@@ -145,6 +145,17 @@ a FAT volume.
   full message queue loses one — and `SIGNAL` and `WAIT` are separate rights, so
   the waiting half of a relationship can be handed out on its own. The
   keyboard driver in ring 3 takes its interrupts this way.
+- Sized for 512 logical processors — the biggest x86 part available today has
+  256 cores and 512 threads. That means 32-bit local apic ids end to end, MADT
+  entry type 9 parsed, and the id and the interrupt command going through the
+  x2APIC MSRs when the CPU reports the feature rather than only claiming it in
+  `IA32_APIC_BASE` (QEMU does the second without the first, and the MSR read is
+  a #GP with no way back). What is *not* done: starting more than 255 of them,
+  because the bootloader's processor tables name processors with eight-bit ids,
+  and delivering an interrupt to a processor past 255, because an I/O APIC
+  redirect and an MSI-X entry both have eight bits for the destination. Both are
+  on the roadmap with the reasons, and the kernel logs the gap when it sees it
+  rather than working around it quietly.
 - One run queue per CPU: the scheduler gives every processor its own ready queue
   and its own list of sleeping tasks, so a switch from one task to the next does
   not go through a lock the whole machine shares; a CPU with nothing to do takes
