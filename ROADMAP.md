@@ -84,7 +84,10 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [x] K1OS boots on K1K (boot test in CI on every push)
 - [x] Service binaries delivered to `/SVC` as WARP packages: every service is a package for the platform `k1k-x86_64`, and `make disk` stages `/SVC` and `MANIFEST.TXT` with `warp --root … --platform k1k-x86_64 install` (WARP 0.4.12; WARP itself does not run on K1K yet, it needs a C library)
 - [ ] A terminal and shell on top of K1K
+- [ ] A C library for K1K: a libc port (musl is the candidate) over `k1k-rt`, so ordinary C programs build for `k1k-x86_64` and run in ring 3
 - [ ] Networking
+- [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on
+- [ ] WARP running on K1K itself: `warp install` on the target, not staged from a host (today `/SVC` is staged by `warp --root … --platform k1k-x86_64`)
 - [ ] NVIDIA GPU driver as a ring-3 service on top of the GSP firmware (after the nova driver in Linux), delivered by WARP
 
 ## Scale
