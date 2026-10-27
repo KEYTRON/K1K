@@ -82,7 +82,7 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 
 ## K1OS on K1K
 - [x] K1OS boots on K1K (boot test in CI on every push)
-- [ ] Service binaries delivered to `/SVC` as WARP packages
+- [x] Service binaries delivered to `/SVC` as WARP packages: every service is a package for the platform `k1k-x86_64`, and `make disk` stages `/SVC` and `MANIFEST.TXT` with `warp --root … --platform k1k-x86_64 install` (WARP 0.4.12; WARP itself does not run on K1K yet, it needs a C library)
 - [ ] A terminal and shell on top of K1K
 - [ ] Networking
 - [ ] NVIDIA GPU driver as a ring-3 service on top of the GSP firmware (after the nova driver in Linux), delivered by WARP

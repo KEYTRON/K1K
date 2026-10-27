@@ -12,6 +12,9 @@ on:
 permissions:
   contents: write
 
+env:
+  WARP_SRC: /lab/git/WARP      # the lab's WARP checkout; the disk is staged with it
+
 jobs:
   release:
     runs-on: [self-hosted, k1lab, k1k]

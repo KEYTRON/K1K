@@ -13,6 +13,9 @@ ISO        = $(BUILD)/k1k.iso
 TEST_ISO   = $(BUILD)/k1k-test.iso
 TEST_CONF  = $(BUILD)/limine-test.conf
 DISK       = $(BUILD)/disk.img
+K1K_VERSION = $(shell sed -n 's/^version *= *"\(.*\)"/\1/p' kernel/Cargo.toml | head -1 | tr - .)
+export WARP_SRC WARP
+export WARP_NO_P2P=1
 DISK_MB   ?= 16
 
 # Storage the ring-3 blk service drives: an NVMe controller with a raw image.
@@ -56,7 +59,9 @@ test-iso: $(LIMINE)/limine kernel $(TEST_CONF)
 	sh tools/mkiso.sh $(KERNEL_ELF) $(TEST_CONF) $(TEST_ISO)
 
 # FAT disk image: /SVC holds the service images and the manifest that says
-# which of them to start, with what capabilities (mtools required).
+# which of them to start, with what capabilities. WARP stages /SVC: each service is
+# a package for the platform k1k-x86_64 (tools/warp-disk.sh; needs WARP 0.4.12+,
+# $(WARP_SRC) or a built $(WARP), mtools, python3).
 # Where the user workspace builds; override (with K1K_USER_TARGET_DIR for the
 # kernel's build.rs) when the source tree is read-only.
 USER_TARGET ?= $(CURDIR)/user/target
@@ -76,15 +81,7 @@ $(DISK): user
 	mmd -i $(DISK) ::/SVC
 	printf 'K1K disk image v1 - FAT volume served by fs over blk\n' > $(BUILD)/README.TXT
 	mcopy -i $(DISK) $(BUILD)/README.TXT ::/README.TXT
-	printf '# K1K service manifest: name image [capabilities]\n' > $(BUILD)/MANIFEST.TXT
-	for s in $(DISK_SERVICES); do \
-		name=$${s%%:*}; rest=$${s#*:}; img=$${rest%%:*}; cap=$${rest#*:}; \
-		printf '%s %s' "$$name" "$$img" >> $(BUILD)/MANIFEST.TXT; \
-		test "$$cap" = "-" || printf ' %s' "$$cap" >> $(BUILD)/MANIFEST.TXT; \
-		printf '\n' >> $(BUILD)/MANIFEST.TXT; \
-		mcopy -i $(DISK) $(USER_BIN)/$$name ::/SVC/$$img || exit 1; \
-	done; \
-	mcopy -i $(DISK) $(BUILD)/MANIFEST.TXT ::/SVC/MANIFEST.TXT
+	sh tools/warp-disk.sh $(DISK) $(USER_BIN) $(K1K_VERSION) $(DISK_SERVICES)
 	mdir -i $(DISK) ::/SVC
 
 disk: $(DISK)

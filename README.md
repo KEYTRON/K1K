@@ -236,9 +236,13 @@ make test       # headless self-test (-smp 4, NVMe disk): supervisor restarts,
                 # SMP scheduling and the ring-3 disk read are all asserted
 ```
 
-`make run`/`make test` attach a 16 MiB FAT16 disk (`build/disk.img`, built with
-mtools: `/SVC/*.ELF` + `/README.TXT`) as an NVMe controller for the `blk`
-service; `make disk` rebuilds just the image.
+`make run`/`make test` attach a 16 MiB FAT16 disk (`build/disk.img`) as an NVMe
+controller for the `blk` service; `make disk` rebuilds just the image. `/SVC` is
+filled by [WARP](https://github.com/KEYTRON/WARP) (0.4.12 or later): each service is packed as
+a package for the platform `k1k-x86_64`, and `tools/warp-disk.sh` installs them with
+`warp --root … --platform k1k-x86_64 install`, which also writes `MANIFEST.TXT`, and copies
+the result onto the FAT volume with mtools. WARP is taken from `$WARP` (a built binary) or built
+from `$WARP_SRC` (default `../WARP`).
 
 The first build clones the Limine binaries into `third_party/limine`. The
 kernel's `build.rs` builds the `user/` workspace and embeds the service ELFs,

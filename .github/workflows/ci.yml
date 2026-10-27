@@ -8,6 +8,9 @@ on:
 
 # Runs on the K1 lab runner (see KEYTRON/K1OS ci/runner): Rust nightly,
 # QEMU+KVM, xorriso and mtools are preinstalled there.
+env:
+  WARP_SRC: /lab/git/WARP      # the lab's WARP checkout, read-only; the disk is staged with it
+
 jobs:
   build-and-test:
     runs-on: [self-hosted, k1lab, k1k]

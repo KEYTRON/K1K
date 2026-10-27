@@ -186,9 +186,13 @@ make test       # headless-самотест (-smp 4, NVMe-диск): прове�
                 # супервизором, SMP-планирование и чтение диска из ring 3
 ```
 
-`make run`/`make test` подключают 16 MiB FAT16-образ (`build/disk.img`,
-собирается mtools: `/SVC/*.ELF` + `/README.TXT`) как NVMe-контроллер для
-сервиса `blk`; `make disk` пересобирает только образ.
+`make run`/`make test` подключают 16-МиБ FAT16-диск (`build/disk.img`) как
+NVMe-контроллер для сервиса `blk`; `make disk` пересобирает только образ. `/SVC` наполняет
+[WARP](https://github.com/KEYTRON/WARP) (0.4.12 и новее): каждый сервис упаковывается в пакет
+платформы `k1k-x86_64`, а `tools/warp-disk.sh` ставит их через
+`warp --root … --platform k1k-x86_64 install` (он же пишет `MANIFEST.TXT`) и копирует результат
+на FAT-том через mtools. WARP берётся из `$WARP` (готовый бинарник) или собирается из
+`$WARP_SRC` (по умолчанию `../WARP`).
 
 Первая сборка клонирует бинарники Limine в `third_party/limine`. `build.rs`
 ядра сам собирает workspace `user/` и встраивает ELF сервисов, так что
