@@ -193,6 +193,16 @@ pub fn find(class: u8, subclass: u8) -> Option<PciDevice> {
         .find(|d| d.class == class && d.subclass == subclass)
 }
 
+/// The first 256 bytes of a function's configuration space, for a driver that
+/// has to walk vendor capabilities (virtio publishes its register windows there).
+pub fn config_space(d: &PciDevice) -> [u32; 64] {
+    let mut out = [0u32; 64];
+    for (i, w) in out.iter_mut().enumerate() {
+        *w = read32(d.bus, d.slot, d.func, (i * 4) as u8);
+    }
+    out
+}
+
 /// Turn on memory decoding and bus mastering so a ring-3 driver can use the
 /// function's MMIO registers and DMA.
 pub fn enable(d: &PciDevice) {

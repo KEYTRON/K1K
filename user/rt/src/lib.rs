@@ -121,6 +121,7 @@ pub mod sys {
     pub const TIME: u64 = 26;
     pub const CAP_REVOKE: u64 = 27;
     pub const CONSOLE_WRITE: u64 = 28;
+    pub const DEV_CONFIG: u64 = 29;
 }
 
 /// Maximum capabilities one `spawn` can hand over.
@@ -446,6 +447,19 @@ pub fn notify_signal(cap: Cap, count: u32) -> Result<usize> {
 /// Re-arm a level-triggered interrupt after servicing the device.
 pub fn irq_ack(irq: Cap) -> Result<()> {
     check(syscall(sys::IRQ_ACK, irq.0 as u64, 0, 0, 0)).map(|_| ())
+}
+
+/// Read the first 256 bytes of a device's PCI configuration space.
+pub fn dev_config(dev: Cap) -> Result<[u8; 256]> {
+    let mut buf = [0u8; 256];
+    check(syscall(
+        sys::DEV_CONFIG,
+        dev.0 as u64,
+        buf.as_mut_ptr() as u64,
+        0,
+        0,
+    ))?;
+    Ok(buf)
 }
 
 /// Obtain an interrupt object (MSI-X entry 0) for a device we hold.

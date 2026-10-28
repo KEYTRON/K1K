@@ -349,6 +349,11 @@ The kernel contains no device protocol and no file system:
   the 8042. It creates an endpoint, binds the interrupt to it, and on each
   message drains the controller's output buffer through `port_in` and decodes
   scancode set 1. Nothing about keyboards exists in ring 0.
+- `net`: a virtio-net driver (virtio 1.x, `1af4:1041`). It reads the device's PCI
+  configuration space (`dev_config`) to find the common/notify/device register windows,
+  maps their BARs, negotiates `VERSION_1` and the MAC, sets up a receive and a transmit
+  split queue in DMA pages, and polls. On top it speaks just enough Ethernet, ARP, IPv4 and
+  ICMP to resolve the QEMU gateway and ping it. Sockets and a real stack come later.
 - `blk`: an NVMe driver. It receives the controller as a `Device` capability,
   maps BAR0, asks for its MSI-X interrupt (`dev_irq`) and binds it to an
   endpoint *before* enabling the controller, allocates DMA pages for the admin
@@ -535,6 +540,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 26 | `time` | — | nanoseconds since boot, monotonic on every core |
 | 27 | `cap_revoke` | `task, slot` | 0, `EPERM`, `EINVAL` |
 | 28 | `console_write` | `console, ptr, len` | bytes written, `EPERM`, `EINVAL`, `EFAULT` |
+| 29 | `dev_config` | `device, buf` | 0 (256 bytes of PCI configuration space copied), `EPERM`, `EFAULT` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

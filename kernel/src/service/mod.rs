@@ -85,6 +85,7 @@ static KBD: &[u8] = image!("kbd");
 static NOTIFY: &[u8] = image!("notify");
 static REVOKE: &[u8] = image!("revoke");
 static BLK: &[u8] = image!("blk");
+static NET: &[u8] = image!("net");
 static FS: &[u8] = image!("fs");
 
 pub fn register(spec: ServiceSpec) -> Option<usize> {
@@ -192,6 +193,32 @@ pub fn init_builtin() {
         dynamic: false,
         args: b"",
     });
+
+    // Network driver: slot 0 = the first virtio network device (modern, 1af4:1041).
+    let mut net_grants = Vec::new();
+    if let Some(nic) = pci::find_id(0x1af4, 0x1041) {
+        pci::enable(&nic);
+        net_grants.push(Grant {
+            object: Object::Device(Arc::new(DeviceObject { pci: nic })),
+            rights: Rights::MAP_READ.union(Rights::MAP_WRITE),
+        });
+        klog!(
+            "superv",
+            "virtio-net {:02x}:{:02x}.{} handed to service 'net'",
+            nic.bus,
+            nic.slot,
+            nic.func
+        );
+        register(ServiceSpec {
+            name: "net",
+            image: NET,
+            grants: net_grants,
+            dynamic: false,
+            args: b"",
+        });
+    } else {
+        klog!("superv", "no virtio-net device found; no 'net' service");
+    }
 
     // File system + init: slot 0 = blk requests, slot 1 = spawn authority,
     // slot 2 = the file service's receiving half, slot 3 = the half it hands

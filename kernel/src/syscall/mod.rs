@@ -41,6 +41,7 @@ pub const SYS_NOTIFY_SIGNAL: u64 = 25;
 pub const SYS_TIME: u64 = 26;
 pub const SYS_CAP_REVOKE: u64 = 27;
 pub const SYS_CONSOLE_WRITE: u64 = 28;
+pub const SYS_DEV_CONFIG: u64 = 29;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -352,6 +353,24 @@ fn sys_dev_info(slot: u64, buf: u64) -> i64 {
         words[3 + 2 * i] = b.size | if b.io { 1 << 63 } else { 0 };
     }
     match copy_to_user(buf, &words_to_bytes(&words)) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Copy the first 256 bytes of a device's PCI configuration space to the caller.
+fn sys_dev_config(slot: u64, buf: u64) -> i64 {
+    let Some(dev) = sched::with_current(|t| {
+        t.caps
+            .lookup(slot as u32, Rights::MAP_READ)?
+            .device()
+            .cloned()
+    }) else {
+        return EPERM;
+    };
+    let words = crate::arch::x86_64::pci::config_space(&dev.pci);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    match copy_to_user(buf, &bytes) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -743,6 +762,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
         SYS_CAP_REVOKE => sys_cap_revoke(a0, a1),
         SYS_CONSOLE_WRITE => sys_console_write(a0, a1, a2),
+        SYS_DEV_CONFIG => sys_dev_config(a0, a1),
         SYS_TIME => {
             // The monotonic clock: what the tick counter cannot answer, since it
             // only advances in whole interrupts and only on the boot processor.

@@ -82,7 +82,8 @@
 - [x] Терминал и shell поверх K1K: `kbd` шлёт клавиши в `sh`, тот отвечает через капабилити `Console` (`console_write`); команды `help echo ls cat uptime mem ver`, проверка вводом через QEMU (`make test-shell`). Запуск программ из него ждёт модель процессов и библиотеку C
 - [x] Первая библиотека C для K1K (`libc/`): string/stdlib/stdio/ctype/errno/assert/time поверх небольшого слоя сисколлов на Rust (`user/libc-sys`); обычные программы на C собираются под `k1k-x86_64` и работают в ring 3 как сервисы (`user/c/chello`, доставляется WARP-пакетом; `make libc`, `make test-libc`)
 - [ ] Полноценная libc (кандидат — musl): файловые дескрипторы POSIX, `getenv`, `time`, `malloc` на настоящих страницах, сокеты, когда появится сетевой стек
-- [ ] Сеть
+- [x] Сетевой драйвер: `net`, сервис virtio-net в ring 3 (современный virtio через PCI capabilities, новый сисколл `dev_config`); находит шлюз по ARP и пингует его в `make test`
+- [ ] Сетевой стек: IP/UDP/TCP сервисом с сокетами через IPC, DHCP и DNS
 - [ ] TLS и libcurl на K1K (нужны библиотека C и сеть) — последнее, от чего зависит WARP
 - [ ] WARP на самом K1K: `warp install` на целевой системе, а не со стороны хоста (сейчас `/SVC` собирается через `warp --root … --platform k1k-x86_64`)
 - [ ] Драйвер GPU NVIDIA — сервис в ring 3 поверх прошивки GSP (по образцу драйвера nova в Linux), доставка через WARP

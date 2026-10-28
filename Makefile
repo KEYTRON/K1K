@@ -19,6 +19,7 @@ export WARP_NO_P2P=1
 DISK_MB   ?= 16
 
 # Storage the ring-3 blk service drives: an NVMe controller with a raw image.
+QEMU_NET   = -netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on
 QEMU_DISK  = -drive file=$(DISK),if=none,format=raw,id=nvme0 \
              -device nvme,drive=nvme0,serial=K1K-NVME-0001
 
@@ -128,12 +129,12 @@ disk: $(DISK)
 run: run-bios
 
 run-bios: iso $(DISK)
-	qemu-system-x86_64 -M q35 -cdrom $(ISO) -boot d -serial stdio $(QEMU_DISK) $(QEMUFLAGS)
+	qemu-system-x86_64 -M q35 -cdrom $(ISO) -boot d -serial stdio $(QEMU_DISK) $(QEMU_NET) $(QEMUFLAGS)
 
 run-uefi: iso $(DISK)
 	qemu-system-x86_64 -M q35 \
 		-drive if=pflash,unit=0,format=raw,file=/usr/share/edk2-ovmf/OVMF_CODE.fd,readonly=on \
-		-cdrom $(ISO) -serial stdio $(QEMU_DISK) $(QEMUFLAGS)
+		-cdrom $(ISO) -serial stdio $(QEMU_DISK) $(QEMU_NET) $(QEMUFLAGS)
 
 # Headless self-test: kernel boots with `autotest`, runs the services for a
 # few seconds and exits QEMU with status 33 (success) via isa-debug-exit.
@@ -143,7 +144,7 @@ test: test-iso $(DISK)
 	@rm -f $(BUILD)/serial.log
 	@timeout 90 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
 		-display none -serial file:$(BUILD)/serial.log -no-reboot \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMUFLAGS); \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMU_NET) $(QEMUFLAGS); \
 	status=$$?; cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
 	test $$status -eq 33 \
 		&& grep -q 'fs\] mounted' $(BUILD)/serial.log \
@@ -154,6 +155,7 @@ test: test-iso $(DISK)
 		&& grep -q 'kbd\] keyboard driver online (ring 3, IRQ 1 via notification)' $(BUILD)/serial.log \
 		&& grep -q 'sh\] shell online' $(BUILD)/serial.log \
 		&& grep -q 'chello: /README.TXT says "K1K disk image' $(BUILD)/serial.log \
+		&& grep -q 'net\] ping 10.0.2.2: reply' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \
@@ -182,7 +184,7 @@ test-kvm: test-iso $(DISK)
 	timeout 90 qemu-system-x86_64 -M q35 -accel kvm -cpu host,+invtsc,+rdtscp \
 		-cdrom $(TEST_ISO) -boot d \
 		-display none -serial file:$(BUILD)/serial-kvm.log -no-reboot \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) -m 512M -smp 4; \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMU_NET) -m 512M -smp 4; \
 	status=$$?; cat $(BUILD)/serial-kvm.log; echo "qemu exit: $$status"; \
 	test $$status -eq 33 \
 		&& grep -q 'clock\] TSC [0-9]* MHz' $(BUILD)/serial-kvm.log \

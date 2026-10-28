@@ -10,6 +10,7 @@ members = [
     "svc/notify",
     "svc/revoke",
     "svc/blk",
+    "svc/net",
     "svc/fs",
     "svc/sh",
     "libc-sys",
