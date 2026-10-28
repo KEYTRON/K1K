@@ -84,7 +84,8 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [x] K1OS boots on K1K (boot test in CI on every push)
 - [x] Service binaries delivered to `/SVC` as WARP packages: every service is a package for the platform `k1k-x86_64`, and `make disk` stages `/SVC` and `MANIFEST.TXT` with `warp --root … --platform k1k-x86_64 install` (WARP 0.4.12; WARP itself does not run on K1K yet, it needs a C library)
 - [x] A terminal and shell on top of K1K: `kbd` sends keys to `sh`, which answers through a `Console` capability (`console_write`); built-ins `help echo ls cat uptime mem ver`, tested by typing through QEMU (`make test-shell`). Starting programs from it waits for a process model and a C library
-- [ ] A C library for K1K: a libc port (musl is the candidate) over `k1k-rt`, so ordinary C programs build for `k1k-x86_64` and run in ring 3
+- [x] A first C library for K1K (`libc/`): string/stdlib/stdio/ctype/errno/assert/time over a small Rust syscall layer (`user/libc-sys`), so ordinary C programs build for `k1k-x86_64` and run in ring 3 as services (`user/c/chello`, shipped as a WARP package; `make libc`, `make test-libc`)
+- [ ] A fuller libc (musl is the candidate): POSIX file descriptors, `getenv`, `time`, `malloc` on real pages, sockets once there is a network stack
 - [ ] Networking
 - [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on
 - [ ] WARP running on K1K itself: `warp install` on the target, not staged from a host (today `/SVC` is staged by `warp --root … --platform k1k-x86_64`)

@@ -30,7 +30,7 @@ else
   KERNEL_ELF = kernel/target/x86_64-unknown-none/debug/k1k
 endif
 
-.PHONY: all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
+.PHONY: libc test-libc all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
 
 all: iso
 
@@ -58,24 +58,62 @@ $(TEST_CONF): limine.conf
 test-iso: $(LIMINE)/limine kernel $(TEST_CONF)
 	sh tools/mkiso.sh $(KERNEL_ELF) $(TEST_CONF) $(TEST_ISO)
 
-# FAT disk image: /SVC holds the service images and the manifest that says
-# which of them to start, with what capabilities. WARP stages /SVC: each service is
-# a package for the platform k1k-x86_64 (tools/warp-disk.sh; needs WARP 0.4.12+,
-# $(WARP_SRC) or a built $(WARP), mtools, python3).
 # Where the user workspace builds; override (with K1K_USER_TARGET_DIR for the
 # kernel's build.rs) when the source tree is read-only.
 USER_TARGET ?= $(CURDIR)/user/target
 export K1K_USER_TARGET_DIR = $(USER_TARGET)
 USER_BIN = $(USER_TARGET)/x86_64-unknown-none/release
+
+# The C library (libc/): plain C on top of the Rust syscall layer in
+# user/libc-sys, and the C programs built with it (user/c/*). Freestanding:
+# no red zone and no SSE in ring 3, and -fno-builtin so the string functions are
+# not turned into calls to themselves.
+CC_K1K     = gcc
+CFLAGS_K1K = -O2 -Wall -Wextra -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
+             -fno-stack-protector -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only \
+             -nostdinc -isystem libc/include -isystem $(shell $(CC_K1K) -print-file-name=include)
+LIBC_OBJ   = $(patsubst libc/src/%.c,$(BUILD)/libc/%.o,$(wildcard libc/src/*.c))
+LIBC_SYS   = $(USER_BIN)/libk1kc_sys.a
+C_PROGRAMS = chello
+
+$(BUILD)/libc/%.o: libc/src/%.c $(wildcard libc/include/*.h)
+	@mkdir -p $(BUILD)/libc
+	$(CC_K1K) $(CFLAGS_K1K) -c $< -o $@
+
+$(BUILD)/libc/libk1kc.a: $(LIBC_OBJ)
+	ar rcs $@ $(LIBC_OBJ)
+
+$(LIBC_SYS): user
+	@test -f $@
+
+$(BUILD)/c/%: user/c/%/*.c $(BUILD)/libc/libk1kc.a $(LIBC_SYS)
+	@mkdir -p $(BUILD)/c
+	$(CC_K1K) $(CFLAGS_K1K) -c user/c/$*/*.c -o $(BUILD)/c/$*.o
+	$(CC_K1K) -nostdlib -static -no-pie -Wl,-T,user/user.ld -Wl,-zmax-page-size=0x1000 -Wl,--gc-sections \
+		-o $@ $(BUILD)/c/$*.o $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
+
+libc: $(addprefix $(BUILD)/c/,$(C_PROGRAMS))
+
+# The formatter behind printf against the host's C library, case by case.
+test-libc:
+	@mkdir -p $(BUILD)/libc
+	cc -O1 -Wall -Wno-format -o $(BUILD)/libc/format-test libc/tests/format-test.c libc/src/format.c
+	$(BUILD)/libc/format-test
+
+# FAT disk image: /SVC holds the service images and the manifest that says
+# which of them to start, with what capabilities. WARP stages /SVC: each service is
+# a package for the platform k1k-x86_64 (tools/warp-disk.sh; needs WARP 0.4.12+,
+# $(WARP_SRC) or a built $(WARP), mtools, python3).
 # name:image:capabilities — the manifest fs reads at boot. Only what is listed
 # here is started; an image dropped into /SVC without a manifest line stays
 # inert. A capability of "-" means none.
 DISK_SERVICES = \
 	hello:HELLO.ELF:fs \
 	flaky:FLAKY.EOF:- \
-	sh:SH.ELF:fs,tty,console
+	sh:SH.ELF:fs,tty,console \
+	chello:CHELLO.ELF:fs,console
 
-$(DISK): user
+$(DISK): user libc
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=$(DISK_MB) status=none
 	mformat -i $(DISK) -v K1KDISK ::
@@ -115,6 +153,8 @@ test: test-iso $(DISK)
 		&& grep -q 'cap\] withdrew' $(BUILD)/serial.log \
 		&& grep -q 'kbd\] keyboard driver online (ring 3, IRQ 1 via notification)' $(BUILD)/serial.log \
 		&& grep -q 'sh\] shell online' $(BUILD)/serial.log \
+		&& grep -q 'chello: /README.TXT says "K1K disk image' $(BUILD)/serial.log \
+		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \
 		&& grep -q 'fs\] serving files' $(BUILD)/serial.log \

@@ -42,6 +42,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "k1kc-sys"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "k1k-rt",
+]
+
+[[package]]
 name = "kbd"
 version = "1.0.0-alpha.1"
 dependencies = [

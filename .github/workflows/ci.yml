@@ -42,6 +42,9 @@ jobs:
       - name: Shell, typed to through the emulated keyboard
         run: make test-shell
 
+      - name: C library formatter against the host's printf
+        run: make test-libc
+
       - name: Upload serial log
         if: always()
         uses: actions/upload-artifact@v4

@@ -12,6 +12,7 @@ members = [
     "svc/blk",
     "svc/fs",
     "svc/sh",
+    "libc-sys",
 ]
 
 [workspace.package]

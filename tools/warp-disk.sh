@@ -33,7 +33,8 @@ for s in "$@"; do
     name="${s%%:*}"; rest="${s#*:}"; img="${rest%%:*}"; caps="${rest#*:}"
     [ "$caps" = "-" ] && caps=""
     d="$B/pk/$name"; mkdir -p "$d/files/SVC"
-    cp "$USER_BIN/$name" "$d/files/SVC/$img"
+    # A Rust service is built into the user workspace, a C program into build/c.
+    if [ -f "$USER_BIN/$name" ]; then cp "$USER_BIN/$name" "$d/files/SVC/$img"; else cp "$HERE/build/c/$name" "$d/files/SVC/$img"; fi
     printf '{"name": "k1k-%s", "version": "%s", "description": "K1K service %s",\n "install_links": [{"from": "SVC/%s", "to": "/SVC/%s"}],\n "k1k_service": {"name": "%s", "image": "%s", "caps": "%s"}}\n' \
         "$name" "$VERSION" "$name" "$img" "$img" "$name" "$img" "$caps" > "$d/manifest.json"
     tar -C "$d" --owner=0 --group=0 --numeric-owner --mtime='2026-01-01 00:00:00' -I 'gzip -n' \
