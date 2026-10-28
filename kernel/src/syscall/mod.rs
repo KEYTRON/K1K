@@ -190,14 +190,21 @@ fn sys_send_cap(ep_slot: u64, cap_slot: u64, mask: u64, w0: u64) -> i64 {
     deliver(&ep, msg)
 }
 
-fn sys_recv(slot: u64, buf: u64) -> i64 {
+fn sys_recv(slot: u64, buf: u64, nonblock: u64) -> i64 {
     let Some(ep) = lookup_endpoint(slot, Rights::RECV) else {
         return EPERM;
     };
     if !user_range_ok(buf, 32) {
         return EFAULT;
     }
-    let mut msg = ep.recv();
+    let mut msg = if nonblock != 0 {
+        match ep.try_recv() {
+            Some(m) => m,
+            None => return EAGAIN,
+        }
+    } else {
+        ep.recv()
+    };
     msg.words[3] = match msg.cap.take() {
         Some(cap) => sched::with_current(|t| t.caps.insert(cap))
             .map(|s| s as u64)
@@ -748,7 +755,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
             0
         }
         SYS_SEND => sys_send(a0, a1, a2, a3),
-        SYS_RECV => sys_recv(a0, a1),
+        SYS_RECV => sys_recv(a0, a1, a2),
         SYS_INFO => sys_info(a0),
         SYS_SEND_CAP => sys_send_cap(a0, a1, a2, a3),
         SYS_CAP_DROP => sys_cap_drop(a0),

@@ -117,7 +117,7 @@ a FAT volume.
   over IPC into a client-provided DMA buffer; `fs` — read-only FAT12/16/32 on
   top of `blk`, doubling as init; `net` — a virtio-net driver in ring 3 (found by walking the
   PCI vendor capabilities, polled queues over DMA pages) that leases an address over DHCP, resolves the gateway with ARP and
-  pings it (`make test` checks the reply from QEMU's user-mode network);
+  pings it, resolves names, and speaks TCP to one client at a time over IPC (`nettest` fetches a file over HTTP from the host in `make test`);
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
   grants to `ping` as a capability.
 - Services on the disk (`/SVC`): `hello`, which lists `/SVC` and reads

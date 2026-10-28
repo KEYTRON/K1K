@@ -142,10 +142,11 @@ run-uefi: iso $(DISK)
 # serving a real file read to a service that got no memory address of its own.
 test: test-iso $(DISK)
 	@rm -f $(BUILD)/serial.log
+	@sh tools/http-fixture.sh start $(BUILD)
 	@timeout 90 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
 		-display none -serial file:$(BUILD)/serial.log -no-reboot \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMU_NET) $(QEMUFLAGS); \
-	status=$$?; cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
+	status=$$?; sh tools/http-fixture.sh stop $(BUILD); cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
 	test $$status -eq 33 \
 		&& grep -q 'fs\] mounted' $(BUILD)/serial.log \
 		&& grep -q 'notify\] notification semantics ok' $(BUILD)/serial.log \
@@ -157,6 +158,7 @@ test: test-iso $(DISK)
 		&& grep -q 'chello: /README.TXT says "K1K disk image' $(BUILD)/serial.log \
 		&& grep -q 'net\] ping 10.0.2.2: reply' $(BUILD)/serial.log \
 		&& grep -q 'net\] dhcp: leased 10.0.2.15' $(BUILD)/serial.log \
+		&& grep -q 'nettest\] http ok' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \
@@ -182,11 +184,12 @@ test-kvm: test-iso $(DISK)
 		echo "kvm not available; skipping the hardware-clock test"; exit 0; \
 	fi; \
 	rm -f $(BUILD)/serial-kvm.log; \
+	sh tools/http-fixture.sh start $(BUILD); \
 	timeout 90 qemu-system-x86_64 -M q35 -accel kvm -cpu host,+invtsc,+rdtscp \
 		-cdrom $(TEST_ISO) -boot d \
 		-display none -serial file:$(BUILD)/serial-kvm.log -no-reboot \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 $(QEMU_DISK) $(QEMU_NET) -m 512M -smp 4; \
-	status=$$?; cat $(BUILD)/serial-kvm.log; echo "qemu exit: $$status"; \
+	status=$$?; sh tools/http-fixture.sh stop $(BUILD); cat $(BUILD)/serial-kvm.log; echo "qemu exit: $$status"; \
 	test $$status -eq 33 \
 		&& grep -q 'clock\] TSC [0-9]* MHz' $(BUILD)/serial-kvm.log \
 		&& grep -q 'cpu(s) sampled the TSC' $(BUILD)/serial-kvm.log

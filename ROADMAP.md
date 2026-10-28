@@ -89,6 +89,7 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [x] A network driver: `net`, a virtio-net service in ring 3 (modern virtio over PCI capabilities, new syscall `dev_config`); resolves the gateway with ARP and pings it in `make test`
 - [x] DHCP client in `net`: leases the address, router and DNS server (checked in `make test`)
 - [x] `net` is a small stack of its own (Ethernet, ARP, IPv4, ICMP echo, UDP with checksums) and a DNS stub resolver; it stays up and answers ARP and ping. DNS is logged but not required by `make test` (CI may have no upstream resolver)
+- [x] TCP client in `net` (one connection, in-order receive, retransmitting send) and a socket-like IPC protocol (`netproto`); the `nettest` service fetches a file over HTTP from the host in `make test`; non-blocking `recv` (syscall 5, `nonblock`)
 - [ ] A network stack proper: IP/UDP/TCP as a service with sockets over IPC, DHCP and DNS
 - [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on
 - [ ] WARP running on K1K itself: `warp install` on the target, not staged from a host (today `/SVC` is staged by `warp --root … --platform k1k-x86_64`)
@@ -125,7 +126,7 @@ Rough edges noticed along the way; none blocks the current work, all are worth c
 - [ ] `uptime_ns()` is too coarse to time a network round trip (a ping measured "0 us"); a finer clock for services
 - [ ] `net` takes no interrupts: virtio queues are polled every millisecond; bind the device's MSI-X vector to the service endpoint
 - [ ] `net` has no routing table (everything goes through the gateway), no IPv4 fragmentation and no legacy (transitional) virtio-net support
-- [ ] `net` serves nobody yet: sockets over IPC come with TCP; a blocking `recv` without a non-blocking variant is why it polls
+- [ ] `net` serves one client and one TCP connection at a time, with no listening sockets and no UDP sockets over IPC
 - [ ] DNS is only logged by `make test` (CI may have no upstream resolver); a local resolver on the host side would let the test require it
 - [ ] `make test-kvm` is not run in CI after the shell, libc and network changes
 - [ ] WARP 0.4.12 is published for x86_64 only: aarch64 (OrbStack on the Mac), Termux (android_aarch64) and macOS builds are still 0.4.9

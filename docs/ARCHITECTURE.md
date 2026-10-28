@@ -352,7 +352,7 @@ The kernel contains no device protocol and no file system:
 - `net`: a virtio-net driver (virtio 1.x, `1af4:1041`). It reads the device's PCI
   configuration space (`dev_config`) to find the common/notify/device register windows,
   maps their BARs, negotiates `VERSION_1` and the MAC, sets up a receive and a transmit
-  split queue in DMA pages, and polls. On top sit `stack.rs` (Ethernet, ARP, IPv4, ICMP echo, UDP; every packet is routed via the gateway), `dhcp.rs` (lease over raw UDP frames) and `dns.rs` (an A-record stub resolver). The service pings the gateway, resolves a name and then keeps answering ARP and ping. Sockets and a real stack come later.
+  split queue in DMA pages, and polls. On top sit `stack.rs` (Ethernet, ARP, IPv4, ICMP echo, UDP; every packet is routed via the gateway), `dhcp.rs` (lease over raw UDP frames) and `dns.rs` (an A-record stub resolver). `tcp.rs` is a client TCP: one connection, in-order receive into a 16 KiB ring, stop-and-wait send with retransmission, MSS option. The service pings the gateway, resolves a name and then serves requests of `netproto` (`REGISTER_BUF`, `SET_REPLY`, `CONNECT`, `SEND`, `RECV`, `CLOSE`) from one client at a time, answering ARP and ping in between. `nettest` is that client: it fetches a file over HTTP from the host (`tools/http-fixture.sh`) in `make test`. Sockets and a real stack come later.
 - `blk`: an NVMe driver. It receives the controller as a `Device` capability,
   maps BAR0, asks for its MSI-X interrupt (`dev_irq`) and binds it to an
   endpoint *before* enabling the controller, allocates DMA pages for the admin
@@ -515,7 +515,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 2 | `yield` | — | 0 |
 | 3 | `sleep` | `ms` | 0 |
 | 4 | `send` | `slot, w0, w1, w2` | 0, `EPERM`, `EAGAIN` |
-| 5 | `recv` | `slot, buf[4×u64]` (word 3 = received cap slot or `NO_CAP`) | sender task id, `EPERM`, `EFAULT` |
+| 5 | `recv` | `slot, buf[4×u64], nonblock` (word 3 = received cap slot or `NO_CAP`; `nonblock != 0` returns `EAGAIN` instead of waiting) | sender task id, `EPERM`, `EFAULT`, `EAGAIN` |
 | 6 | `info` | `buf[2×u64]` → `uptime_ms, task_id` | 0 |
 | 7 | `send_cap` | `ep_slot, cap_slot, rights_mask, w0` | 0, `EPERM`, `EAGAIN` |
 | 8 | `cap_drop` | `slot` | 0, `EINVAL` |

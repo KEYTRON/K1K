@@ -86,6 +86,7 @@ static NOTIFY: &[u8] = image!("notify");
 static REVOKE: &[u8] = image!("revoke");
 static BLK: &[u8] = image!("blk");
 static NET: &[u8] = image!("net");
+static NETTEST: &[u8] = image!("nettest");
 static FS: &[u8] = image!("fs");
 
 pub fn register(spec: ServiceSpec) -> Option<usize> {
@@ -195,6 +196,7 @@ pub fn init_builtin() {
     });
 
     // Network driver: slot 0 = the first virtio network device (modern, 1af4:1041).
+    let net_req = Endpoint::new();
     let mut net_grants = Vec::new();
     if let Some(nic) = pci::find_id(0x1af4, 0x1041) {
         pci::enable(&nic);
@@ -209,10 +211,19 @@ pub fn init_builtin() {
             nic.slot,
             nic.func
         );
+        net_grants.push(Grant::endpoint(&net_req, Rights::RECV));
         register(ServiceSpec {
             name: "net",
             image: NET,
             grants: net_grants,
+            dynamic: false,
+            args: b"",
+        });
+        // First client of `net`: slot 0 = the request endpoint.
+        register(ServiceSpec {
+            name: "nettest",
+            image: NETTEST,
+            grants: alloc::vec![Grant::endpoint(&net_req, Rights::SEND)],
             dynamic: false,
             args: b"",
         });

@@ -18,14 +18,14 @@ pub fn checksum(data: &[u8]) -> u16 {
     fold(sum(data, 0))
 }
 
-fn sum(data: &[u8], mut acc: u32) -> u32 {
+pub fn sum(data: &[u8], mut acc: u32) -> u32 {
     for pair in data.chunks(2) {
         acc += u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]) as u32;
     }
     acc
 }
 
-fn fold(mut acc: u32) -> u16 {
+pub fn fold(mut acc: u32) -> u16 {
     while acc >> 16 != 0 {
         acc = (acc & 0xFFFF) + (acc >> 16);
     }
@@ -52,6 +52,16 @@ pub enum Event {
     },
     EchoReply {
         seq: u16,
+        len: usize,
+    },
+    Tcp {
+        src: Ip,
+        sport: u16,
+        dport: u16,
+        flags: u8,
+        seq: u32,
+        ack: u32,
+        off: usize,
         len: usize,
     },
 }
@@ -228,6 +238,22 @@ impl Stack {
                 off: t + 8,
                 len: tlen - 8,
             },
+            6 if dst_ok && tlen >= 20 => {
+                let doff = (f[t + 12] >> 4) as usize * 4;
+                if doff < 20 || doff > tlen {
+                    return Event::None;
+                }
+                Event::Tcp {
+                    src,
+                    sport: u16::from_be_bytes([f[t], f[t + 1]]),
+                    dport: u16::from_be_bytes([f[t + 2], f[t + 3]]),
+                    flags: f[t + 13],
+                    seq: u32::from_be_bytes([f[t + 4], f[t + 5], f[t + 6], f[t + 7]]),
+                    ack: u32::from_be_bytes([f[t + 8], f[t + 9], f[t + 10], f[t + 11]]),
+                    off: t + doff,
+                    len: tlen - doff,
+                }
+            }
             _ => Event::None,
         }
     }

@@ -111,6 +111,11 @@ impl Endpoint {
         })
     }
 
+    /// Take a queued message if there is one; never blocks.
+    pub fn try_recv(&self) -> Option<Message> {
+        interrupts::without_interrupts(|| self.inner.lock().queue.pop_front())
+    }
+
     /// Receive a message, blocking the current task until one arrives.
     ///
     /// Registering as a receiver, marking ourselves blocked and switching away

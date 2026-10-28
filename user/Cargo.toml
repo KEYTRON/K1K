@@ -11,6 +11,7 @@ members = [
     "svc/revoke",
     "svc/blk",
     "svc/net",
+    "svc/nettest",
     "svc/fs",
     "svc/sh",
     "libc-sys",

@@ -146,6 +146,28 @@ pub mod blkproto {
     pub const MAX_BLOCKS: u64 = 16;
 }
 
+/// Wire protocol of the `net` service: one TCP connection at a time, data in a
+/// memory object the client registers (like `blkproto`). Every request gets a
+/// reply `(status, value, 0)` on the client's reply endpoint.
+pub mod netproto {
+    /// Attach a shared buffer (memory capability; page count in the high half of w0).
+    pub const REGISTER_BUF: u64 = 1;
+    /// Where to send replies (endpoint capability attached).
+    pub const SET_REPLY: u64 = 2;
+    /// Open a connection: `w1` = IPv4 address (big-endian u32), `w2` = port.
+    pub const CONNECT: u64 = 3;
+    /// Send `w2` bytes from buffer offset `w1`; reply value = bytes accepted.
+    pub const SEND: u64 = 4;
+    /// Receive up to `w2` bytes into buffer offset `w1`; reply value = bytes
+    /// (0 = the peer closed). Blocks until data, close or timeout.
+    pub const RECV: u64 = 5;
+    pub const CLOSE: u64 = 6;
+    pub const STATUS_OK: u64 = 0;
+    pub const STATUS_ERR: u64 = 1;
+    pub const STATUS_TIMEOUT: u64 = 2;
+    pub const STATUS_REFUSED: u64 = 3;
+}
+
 /// Capability rights bits, as understood by the kernel.
 pub mod rights {
     pub const SEND: u32 = 1 << 0;
@@ -303,6 +325,24 @@ pub fn recv(cap: Cap) -> Result<Message> {
         cap.0 as u64,
         words.as_mut_ptr() as u64,
         0,
+        0,
+    ))?;
+    let cap = (words[3] != NO_CAP).then(|| Cap(words[3] as u32));
+    Ok(Message {
+        sender: sender as u32,
+        words,
+        cap,
+    })
+}
+
+/// Like `recv`, but returns `Error::Again` at once when nothing is queued.
+pub fn try_recv(cap: Cap) -> Result<Message> {
+    let mut words = [0u64; 4];
+    let sender = check(syscall(
+        sys::RECV,
+        cap.0 as u64,
+        words.as_mut_ptr() as u64,
+        1,
         0,
     ))?;
     let cap = (words[3] != NO_CAP).then(|| Cap(words[3] as u32));
