@@ -80,11 +80,11 @@ a FAT volume.
   to the other. A server keeps the receiving half and hands out the sending
   one, so authority over a channel can be delegated without ever widening
   rights — intersecting a `RECV` right with a `SEND` mask would leave nothing.
-- Ring-3 tasks with `syscall`/`sysret`; 23 syscalls: `log`, `exit`, `yield`,
+- Ring-3 tasks with `syscall`/`sysret`; 24 syscalls: `log`, `exit`, `yield`,
   `sleep`, `send`, `recv`, `info`, `send_cap`, `cap_drop`, `mem_create`,
   `mem_map`, `ep_create`, `mem_create_dma`, `mem_phys`, `dev_info`, `dev_map`,
   `spawn`, `irq_bind`, `irq_ack`, `dev_irq`, `port_in`, `port_out`,
-  `spawn_desc`. All registers except `rax/rcx/r11` are preserved across a
+  `spawn_desc`, `console_write`. All registers except `rax/rcx/r11` are preserved across a
   syscall.
 - Every ring-3 task gets a private 4 MiB heap and a boot-info page: the
   supervisor maps both before the task can run and tells the runtime where the
@@ -121,8 +121,16 @@ a FAT volume.
 - Services on the disk (`/SVC`): `hello`, which lists `/SVC` and reads
   `/README.TXT` through the file protocol using the capability its manifest line
   granted it, and `flaky`, which dereferences NULL every third iteration and is
-  brought back without a reboot. A service that exits with code 0 is considered
-  finished and not restarted.
+  brought back without a reboot, and `sh`, the shell. A service that exits with
+  code 0 is considered finished and not restarted.
+- A shell as an ordinary service: `kbd` sends each key it decodes down an
+  endpoint (a send never blocks, so keys typed before a shell exists are just
+  dropped), `sh` reads them, edits its line and answers through a `Console`
+  capability and the `console_write` syscall, which writes raw text without the
+  `[ name]` prefix `log` adds. The manifest line `sh SH.ELF fs,tty,console`
+  is all the authority it has: `tty` is the keys, `console` the text out, `fs`
+  the files. Built-ins: `help`, `echo`, `ls`, `cat`, `uptime`, `mem`, `ver`.
+  Starting programs from it needs a process model and a C library first.
 - A heap for services: `k1k-rt` turns the per-task heap into a global allocator
   (first fit, free list in address order, in-place `realloc`), so services can
   use `Box`, `Vec`, `String` and `format!`. It is tested on the host against an
@@ -248,8 +256,10 @@ The first build clones the Limine binaries into `third_party/limine`. The
 kernel's `build.rs` builds the `user/` workspace and embeds the service ELFs,
 so `make` (or `cargo build` inside `kernel/`) is enough.
 
-Interactive run: `make run`, then type in the QEMU window — the `kbd` service
-echoes each line you finish with Enter into the log.
+Interactive run: `make run`, then type in the QEMU window: the `sh` shell
+answers on the same screen (`help` lists the commands). `make test-shell` does
+the same without a person: it types through the QEMU monitor and checks what the
+shell prints (needs `socat`).
 
 ## Layout
 

@@ -106,8 +106,14 @@ pub fn init_builtin() {
     let req = Endpoint::new();
     let rep = Endpoint::new();
     let blk_req = Endpoint::new();
+    // Keys from the keyboard driver to whoever reads the terminal: `kbd` sends on
+    // one half, `fs` holds the other and hands it to a service the manifest
+    // names `tty` (the shell). A send never blocks, so keys typed before a shell
+    // exists wait in the queue instead of stopping the driver.
+    let (tty_rx, tty_tx) = Endpoint::new_pair();
 
-    // Keyboard driver: slot 0 = ISA IRQ 1, slot 1 = the 8042 ports 0x60..0x64.
+    // Keyboard driver: slot 0 = ISA IRQ 1, slot 1 = the 8042 ports 0x60..0x64,
+    // slot 2 = where decoded keys go.
     register(ServiceSpec {
         name: "kbd",
         image: KBD,
@@ -120,6 +126,7 @@ pub fn init_builtin() {
                 object: Object::Port(PortRange { base: 0x60, len: 5 }),
                 rights: Rights::MAP_READ,
             },
+            Grant::endpoint(&tty_tx, Rights::SEND),
         ],
         dynamic: false,
         args: b"",
@@ -188,7 +195,8 @@ pub fn init_builtin() {
 
     // File system + init: slot 0 = blk requests, slot 1 = spawn authority,
     // slot 2 = the file service's receiving half, slot 3 = the half it hands
-    // out so a service can call the file service.
+    // out so a service can call the file service, slot 4 = the keys, slot 5 =
+    // the console.
     //
     // The two halves are separate objects linked to each other, which is what
     // makes the handout work: `fs` may only receive, a client may only send, and
@@ -206,6 +214,13 @@ pub fn init_builtin() {
             },
             Grant::endpoint(&fs_serve, Rights::RECV),
             Grant::endpoint(&fs_call, Rights::SEND.union(Rights::GRANT)),
+            // Slot 4 = the keys, slot 5 = the console: the shell's terminal, if
+            // the manifest says so.
+            Grant::endpoint(&tty_rx, Rights::RECV.union(Rights::GRANT)),
+            Grant {
+                object: Object::Console,
+                rights: Rights::MAP_WRITE.union(Rights::GRANT),
+            },
         ],
         dynamic: false,
         args: b"",

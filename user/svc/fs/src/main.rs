@@ -35,6 +35,9 @@ pub const CONTROL: Cap = Cap(1);
 pub const SERVE: Cap = Cap(2);
 /// Handed out to services the manifest grants `fs` to; they send on it.
 pub const CALL: Cap = Cap(3);
+/// Keys from the keyboard driver, and the text console: what a shell is given.
+pub const TTY: Cap = Cap(4);
+pub const CONSOLE: Cap = Cap(5);
 
 /// Manifest to read, relative to the volume root.
 const MANIFEST: &str = "/SVC/MANIFEST.TXT";
@@ -276,6 +279,9 @@ fn named_grant(name: &str) -> Option<Grant> {
     match name {
         // Talk to the file service: send requests on the calling half.
         "fs" => Some(Grant::with(CALL, rights::SEND)),
+        // The terminal: read keys, write text.
+        "tty" => Some(Grant::with(TTY, rights::RECV)),
+        "console" => Some(Grant::with(CONSOLE, rights::MAP_WRITE)),
         // Start further services.
         "control" => Some(Grant::full(CONTROL)),
         _ => None,

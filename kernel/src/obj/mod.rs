@@ -127,6 +127,10 @@ pub enum Object {
     Port(PortRange),
     /// Kernel control authority (spawning services); held by init-like tasks.
     Control,
+    /// The text console (serial and framebuffer). `MAP_WRITE` lets a service put
+    /// raw bytes on it, without the `[ name]` prefix `log` adds: a shell draws
+    /// its own prompt and its own echo.
+    Console,
 }
 
 #[derive(Clone)]
@@ -171,6 +175,9 @@ impl Capability {
             Object::Port(p) => Some(*p),
             _ => None,
         }
+    }
+    pub fn is_console(&self) -> bool {
+        matches!(self.object, Object::Console)
     }
     pub fn is_control(&self) -> bool {
         matches!(self.object, Object::Control)

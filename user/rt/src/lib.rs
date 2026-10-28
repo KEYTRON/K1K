@@ -120,6 +120,7 @@ pub mod sys {
     pub const NOTIFY_SIGNAL: u64 = 25;
     pub const TIME: u64 = 26;
     pub const CAP_REVOKE: u64 = 27;
+    pub const CONSOLE_WRITE: u64 = 28;
 }
 
 /// Maximum capabilities one `spawn` can hand over.
@@ -215,6 +216,22 @@ pub fn syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 
 pub fn log_bytes(s: &[u8]) {
     syscall(sys::LOG, s.as_ptr() as u64, s.len() as u64, 0, 0);
+}
+
+/// Put raw text on the console through a `Console` capability: no prefix and no
+/// newline added, so a prompt can stay on its line and a backspace erases.
+/// Long text goes out in page-sized pieces.
+pub fn console_write(console: Cap, s: &[u8]) -> Result<()> {
+    for chunk in s.chunks(4096) {
+        check(syscall(
+            sys::CONSOLE_WRITE,
+            console.0 as u64,
+            chunk.as_ptr() as u64,
+            chunk.len() as u64,
+            0,
+        ))?;
+    }
+    Ok(())
 }
 
 pub fn exit(code: i64) -> ! {

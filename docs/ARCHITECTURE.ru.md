@@ -540,6 +540,7 @@ Cargo-workspace `user/` скриптом `kernel/build.rs` и встраиваю
 | 25 | `notify_signal` | `slot, count` | разбужено ожидающих, `EPERM`, `EINVAL` |
 | 26 | `time` | — | наносекунд с момента загрузки, монотонно на всех CPU |
 | 27 | `cap_revoke` | `task, slot` | 0, `EPERM`, `EINVAL` |
+| 28 | `console_write` | `console, ptr, len` | записано байт, `EPERM`, `EINVAL`, `EFAULT` |
 
 Ошибки: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

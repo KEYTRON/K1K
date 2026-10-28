@@ -75,3 +75,10 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "k1k-rt",
 ]
+
+[[package]]
+name = "sh"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "k1k-rt",
+]

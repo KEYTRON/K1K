@@ -40,6 +40,7 @@ pub const SYS_NOTIFY_WAIT: u64 = 24;
 pub const SYS_NOTIFY_SIGNAL: u64 = 25;
 pub const SYS_TIME: u64 = 26;
 pub const SYS_CAP_REVOKE: u64 = 27;
+pub const SYS_CONSOLE_WRITE: u64 = 28;
 
 pub const EPERM: i64 = -1;
 pub const EAGAIN: i64 = -2;
@@ -131,6 +132,30 @@ fn sys_log(ptr: u64, len: u64) -> i64 {
             let s = core::str::from_utf8(&bytes).unwrap_or("<invalid utf-8>");
             klog!(name, "{}", s);
             0
+        }
+        Err(e) => e,
+    }
+}
+
+/// Put raw bytes on the console. Needs a `Console` capability with `MAP_WRITE`;
+/// one call carries at most a page, so a task cannot hold the console locks for
+/// long. Control characters (`\n`, `\r`, backspace) are the console's own.
+fn sys_console_write(slot: u64, ptr: u64, len: u64) -> i64 {
+    let allowed = sched::with_current(|t| {
+        t.caps
+            .lookup(slot as u32, Rights::MAP_WRITE)
+            .is_some_and(|c| c.is_console())
+    });
+    if !allowed {
+        return EPERM;
+    }
+    if len > 4096 {
+        return EINVAL;
+    }
+    match copy_from_user(ptr, len) {
+        Ok(bytes) => {
+            crate::console::write_raw(&bytes);
+            len as i64
         }
         Err(e) => e,
     }
@@ -717,6 +742,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         SYS_DEV_MAP => sys_dev_map(a0, a1),
         SYS_SPAWN => sys_spawn(a0, a1, a2, a3),
         SYS_CAP_REVOKE => sys_cap_revoke(a0, a1),
+        SYS_CONSOLE_WRITE => sys_console_write(a0, a1, a2),
         SYS_TIME => {
             // The monotonic clock: what the tick counter cannot answer, since it
             // only advances in whole interrupts and only on the boot processor.

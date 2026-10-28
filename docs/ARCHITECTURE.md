@@ -534,6 +534,7 @@ wrappers in `user/rt` (`k1k-rt`).
 | 25 | `notify_signal` | `slot, count` | waiters woken, `EPERM`, `EINVAL` |
 | 26 | `time` | — | nanoseconds since boot, monotonic on every core |
 | 27 | `cap_revoke` | `task, slot` | 0, `EPERM`, `EINVAL` |
+| 28 | `console_write` | `console, ptr, len` | bytes written, `EPERM`, `EINVAL`, `EFAULT` |
 
 Errors: `EPERM = -1`, `EAGAIN = -2`, `EFAULT = -3`, `EINVAL = -4`,
 `ENOSYS = -5`, `ENOMEM = -6`.

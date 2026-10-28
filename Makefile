@@ -30,7 +30,7 @@ else
   KERNEL_ELF = kernel/target/x86_64-unknown-none/debug/k1k
 endif
 
-.PHONY: all user kernel iso test-iso disk run run-bios run-uefi test test-heap clean distclean limine fmt clippy
+.PHONY: all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
 
 all: iso
 
@@ -72,7 +72,8 @@ USER_BIN = $(USER_TARGET)/x86_64-unknown-none/release
 # inert. A capability of "-" means none.
 DISK_SERVICES = \
 	hello:HELLO.ELF:fs \
-	flaky:FLAKY.EOF:-
+	flaky:FLAKY.EOF:- \
+	sh:SH.ELF:fs,tty,console
 
 $(DISK): user
 	@mkdir -p $(BUILD)
@@ -113,11 +114,17 @@ test: test-iso $(DISK)
 		&& grep -q 'superv\] task [0-9]* lost [0-9]* capability slot' $(BUILD)/serial.log \
 		&& grep -q 'cap\] withdrew' $(BUILD)/serial.log \
 		&& grep -q 'kbd\] keyboard driver online (ring 3, IRQ 1 via notification)' $(BUILD)/serial.log \
+		&& grep -q 'sh\] shell online' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \
 		&& grep -q 'fs\] serving files' $(BUILD)/serial.log \
 		&& grep -q 'hello\] /SVC holds' $(BUILD)/serial.log \
 		&& grep -q 'hello\] /README.TXT:' $(BUILD)/serial.log
+
+# The shell, typed to through the emulated keyboard: kbd (ring 3) decodes the
+# keys and sends them to sh, which answers on the console. Needs socat.
+test-shell: iso $(DISK)
+	@sh tools/shell-test.sh $(ISO) $(DISK) $(QEMUFLAGS)
 
 # The same autotest under KVM, where the machine is the host: the TSC is the
 # host's own, and the HPET is the chipset's real one. Two things have to be asked

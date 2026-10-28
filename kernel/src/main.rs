@@ -191,6 +191,19 @@ extern "C" fn kmain() -> ! {
         sched::sleep_ms(20);
     }
 
+    // Without `autotest` this is a system to use, not a test to finish: the
+    // self-checks below compare the machine against itself a moment after
+    // boot, and a shell being typed at is allowed to disturb them.
+    if !autotest {
+        klog!(
+            "k1k",
+            "boot complete; add `autotest` to the command line to run the self-test"
+        );
+        loop {
+            sched::sleep_ms(1000);
+        }
+    }
+
     klog!(
         "k1k",
         "--- autotest summary at {} ms ---",

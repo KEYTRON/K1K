@@ -39,6 +39,9 @@ jobs:
       - name: Boot test in QEMU (4 CPUs, NVMe disk)
         run: make test
 
+      - name: Shell, typed to through the emulated keyboard
+        run: make test-shell
+
       - name: Upload serial log
         if: always()
         uses: actions/upload-artifact@v4

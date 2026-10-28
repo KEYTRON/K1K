@@ -28,6 +28,23 @@ pub fn _print(args: fmt::Arguments) {
     });
 }
 
+/// Raw bytes from a service holding the console capability: to the serial port
+/// as they are and to the framebuffer through its own control-character
+/// handling (a backspace erases there). Bytes that are not ASCII are shown as `?`.
+pub fn write_raw(bytes: &[u8]) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut serial = SERIAL.lock();
+        let mut fb = FB_CONSOLE.lock();
+        for &b in bytes {
+            let b = if b.is_ascii() { b } else { b'?' };
+            serial.write_char(b as char).ok();
+            if let Some(con) = fb.as_mut() {
+                con.put_char(b);
+            }
+        }
+    });
+}
+
 /// Best-effort output used by the panic handler: bypasses locks that may be
 /// held by the panicking context.
 #[doc(hidden)]

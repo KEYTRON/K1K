@@ -83,7 +83,7 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 ## K1OS on K1K
 - [x] K1OS boots on K1K (boot test in CI on every push)
 - [x] Service binaries delivered to `/SVC` as WARP packages: every service is a package for the platform `k1k-x86_64`, and `make disk` stages `/SVC` and `MANIFEST.TXT` with `warp --root … --platform k1k-x86_64 install` (WARP 0.4.12; WARP itself does not run on K1K yet, it needs a C library)
-- [ ] A terminal and shell on top of K1K
+- [x] A terminal and shell on top of K1K: `kbd` sends keys to `sh`, which answers through a `Console` capability (`console_write`); built-ins `help echo ls cat uptime mem ver`, tested by typing through QEMU (`make test-shell`). Starting programs from it waits for a process model and a C library
 - [ ] A C library for K1K: a libc port (musl is the candidate) over `k1k-rt`, so ordinary C programs build for `k1k-x86_64` and run in ring 3
 - [ ] Networking
 - [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on

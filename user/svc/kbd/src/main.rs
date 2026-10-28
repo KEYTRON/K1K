@@ -4,7 +4,7 @@
 //! interrupt object for ISA IRQ 1 (slot 0) and the 8042 port range (slot 1).
 //! Each interrupt signals a notification we create, we take every signal there
 //! is and drain the controller's output buffer through the port capability,
-//! decode scancode set 1 (US layout) and echo completed lines. If we crash, the
+//! decode scancode set 1 (US layout) and send each key to the terminal (slot 2). If we crash, the
 //! supervisor restarts us and keys keep working.
 //!
 //! A notification rather than an endpoint on purpose: the controller can buffer
@@ -14,10 +14,14 @@
 #![no_std]
 #![no_main]
 
-use k1k_rt::{Cap, WaitMode, exit, irq_ack, irq_bind, log, notify_create, notify_wait, port_in};
+use k1k_rt::{
+    Cap, WaitMode, exit, irq_ack, irq_bind, log, notify_create, notify_wait, port_in, send,
+};
 
 const IRQ: Cap = Cap(0);
 const PORTS: Cap = Cap(1);
+/// Where decoded keys go: whoever reads the terminal.
+const TTY: Cap = Cap(2);
 const DATA: u16 = 0; // 0x60
 const STATUS: u16 = 4; // 0x64
 
@@ -33,8 +37,6 @@ const CAPS: u8 = 0x3A;
 struct Decoder {
     shift: bool,
     caps: bool,
-    line: [u8; 120],
-    len: usize,
 }
 
 impl Decoder {
@@ -52,23 +54,16 @@ impl Decoder {
                 };
                 match ch {
                     0 => {}
-                    b'\n' => {
-                        let s =
-                            core::str::from_utf8(&self.line[..self.len]).unwrap_or("<bad utf8>");
-                        log!("typed: {}", s);
-                        self.len = 0;
-                    }
-                    0x08 => self.len = self.len.saturating_sub(1),
                     _ => {
                         let ch = if self.caps && ch.is_ascii_alphabetic() {
                             ch ^ 0x20
                         } else {
                             ch
                         };
-                        if self.len < self.line.len() {
-                            self.line[self.len] = ch;
-                            self.len += 1;
-                        }
+                        // A send never blocks. With nobody reading (no shell yet)
+                        // the queue fills and the key is dropped, which is the
+                        // right thing for a key nobody is waiting for.
+                        let _ = send(TTY, ch as u64, 0, 0);
                     }
                 }
             }
@@ -79,13 +74,11 @@ impl Decoder {
 fn main() -> ! {
     let keys = notify_create().unwrap_or_else(|e| die("notify_create", e));
     irq_bind(IRQ, keys).unwrap_or_else(|e| die("irq_bind", e));
-    log!("keyboard driver online (ring 3, IRQ 1 via notification), type and press Enter");
+    log!("keyboard driver online (ring 3, IRQ 1 via notification)");
 
     let mut dec = Decoder {
         shift: false,
         caps: false,
-        line: [0; 120],
-        len: 0,
     };
     // Drain anything the controller buffered before we were listening. The
     // line is masked until the first ack, so this is really about the state we
