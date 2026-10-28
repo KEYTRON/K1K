@@ -116,7 +116,7 @@ a FAT volume.
   pages, MSI-X completion interrupts, polling fallback) serving block reads
   over IPC into a client-provided DMA buffer; `fs` — read-only FAT12/16/32 on
   top of `blk`, doubling as init; `net` — a virtio-net driver in ring 3 (found by walking the
-  PCI vendor capabilities, polled queues over DMA pages) that resolves the gateway with ARP and
+  PCI vendor capabilities, polled queues over DMA pages) that leases an address over DHCP, resolves the gateway with ARP and
   pings it (`make test` checks the reply from QEMU's user-mode network);
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
   grants to `ping` as a capability.

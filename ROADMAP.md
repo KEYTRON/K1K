@@ -87,9 +87,11 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [x] A first C library for K1K (`libc/`): string/stdlib/stdio/ctype/errno/assert/time over a small Rust syscall layer (`user/libc-sys`), so ordinary C programs build for `k1k-x86_64` and run in ring 3 as services (`user/c/chello`, shipped as a WARP package; `make libc`, `make test-libc`)
 - [ ] A fuller libc (musl is the candidate): POSIX file descriptors, `getenv`, `time`, `malloc` on real pages, sockets once there is a network stack
 - [x] A network driver: `net`, a virtio-net service in ring 3 (modern virtio over PCI capabilities, new syscall `dev_config`); resolves the gateway with ARP and pings it in `make test`
+- [x] DHCP client in `net`: leases the address, router and DNS server (checked in `make test`)
 - [ ] A network stack: IP/UDP/TCP as a service with sockets over IPC, DHCP and DNS
 - [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on
 - [ ] WARP running on K1K itself: `warp install` on the target, not staged from a host (today `/SVC` is staged by `warp --root … --platform k1k-x86_64`)
+- [ ] Optional third-party antivirus: ClamAV (clearly marked as not ours) as a WARP package, and later a `scan` service that `fs`/WARP ask before a binary runs, Defender-style; needs the full libc and sockets
 - [ ] NVIDIA GPU driver as a ring-3 service on top of the GSP firmware (after the nova driver in Linux), delivered by WARP
 
 ## Scale

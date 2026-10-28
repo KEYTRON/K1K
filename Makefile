@@ -156,6 +156,7 @@ test: test-iso $(DISK)
 		&& grep -q 'sh\] shell online' $(BUILD)/serial.log \
 		&& grep -q 'chello: /README.TXT says "K1K disk image' $(BUILD)/serial.log \
 		&& grep -q 'net\] ping 10.0.2.2: reply' $(BUILD)/serial.log \
+		&& grep -q 'net\] dhcp: leased 10.0.2.15' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \

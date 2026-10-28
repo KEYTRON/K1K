@@ -187,7 +187,7 @@ impl Nic {
             return Err(Error::Inval);
         }
 
-        let mut mk = |index: u16| -> Result<Queue, Error> {
+        let mk = |index: u16| -> Result<Queue, Error> {
             w16(0x16, index);
             if r16(0x18) < QSIZE as u16 {
                 return Err(Error::Inval);
