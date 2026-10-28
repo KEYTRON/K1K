@@ -1,0 +1,4 @@
+BearSSL (https://bearssl.org/), MIT licence (LICENSE.txt), vendored unmodified
+from the commit in COMMIT: the inc/ and src/ directories only. It is built for
+K1K by the top-level Makefile (`make libc`) into build/bearssl/libbearssl.a with
+the system time, system RNG and SIMD back ends switched off (-D flags there).

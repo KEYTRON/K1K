@@ -38,6 +38,7 @@ pub const CALL: Cap = Cap(3);
 /// Keys from the keyboard driver, and the text console: what a shell is given.
 pub const TTY: Cap = Cap(4);
 pub const CONSOLE: Cap = Cap(5);
+pub const NET: Cap = Cap(6);
 
 /// Manifest to read, relative to the volume root.
 const MANIFEST: &str = "/SVC/MANIFEST.TXT";
@@ -282,6 +283,7 @@ fn named_grant(name: &str) -> Option<Grant> {
         // The terminal: read keys, write text.
         "tty" => Some(Grant::with(TTY, rights::RECV)),
         "console" => Some(Grant::with(CONSOLE, rights::MAP_WRITE)),
+        "net" => Some(Grant::with(NET, rights::SEND)),
         // Start further services.
         "control" => Some(Grant::full(CONTROL)),
         _ => None,

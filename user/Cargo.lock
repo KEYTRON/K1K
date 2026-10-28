@@ -63,13 +63,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nettest"
-version = "1.0.0-alpha.1"
-dependencies = [
- "k1k-rt",
-]
-
-[[package]]
 name = "notify"
 version = "1.0.0-alpha.1"
 dependencies = [

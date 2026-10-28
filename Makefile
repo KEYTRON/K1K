@@ -31,7 +31,7 @@ else
   KERNEL_ELF = kernel/target/x86_64-unknown-none/debug/k1k
 endif
 
-.PHONY: libc test-libc all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
+.PHONY: libc bearssl test-libc all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
 
 all: iso
 
@@ -75,7 +75,7 @@ CFLAGS_K1K = -O2 -Wall -Wextra -ffreestanding -fno-builtin -fno-tree-loop-distri
              -nostdinc -isystem libc/include -isystem $(shell $(CC_K1K) -print-file-name=include)
 LIBC_OBJ   = $(patsubst libc/src/%.c,$(BUILD)/libc/%.o,$(wildcard libc/src/*.c))
 LIBC_SYS   = $(USER_BIN)/libk1kc_sys.a
-C_PROGRAMS = chello
+C_PROGRAMS = chello netget
 
 $(BUILD)/libc/%.o: libc/src/%.c $(wildcard libc/include/*.h)
 	@mkdir -p $(BUILD)/libc
@@ -87,11 +87,29 @@ $(BUILD)/libc/libk1kc.a: $(LIBC_OBJ)
 $(LIBC_SYS): user
 	@test -f $@
 
-$(BUILD)/c/%: user/c/%/*.c $(BUILD)/libc/libk1kc.a $(LIBC_SYS)
+$(BUILD)/c/%: user/c/%/*.c $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/bearssl/libbearssl.a
 	@mkdir -p $(BUILD)/c
-	$(CC_K1K) $(CFLAGS_K1K) -c user/c/$*/*.c -o $(BUILD)/c/$*.o
+	$(CC_K1K) $(CFLAGS_K1K) -Ithird_party/bearssl/inc -c user/c/$*/*.c -o $(BUILD)/c/$*.o
 	$(CC_K1K) -nostdlib -static -no-pie -Wl,-T,user/user.ld -Wl,-zmax-page-size=0x1000 -Wl,--gc-sections \
-		-o $@ $(BUILD)/c/$*.o $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
+		-o $@ $(BUILD)/c/$*.o $(BUILD)/bearssl/libbearssl.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
+
+# BearSSL (third_party/bearssl), vendored, for TLS. The system time and entropy
+# sources and the SSE/AES-NI paths do not exist in ring 3 on K1K, so they are
+# switched off; the program seeds the engine itself.
+BEARSSL_FLAGS = -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -DBR_USE_UNIX_TIME=0 \
+                -DBR_USE_WIN32_TIME=0 -DBR_USE_GETENTROPY=0 -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 \
+                -DBR_RDRAND=0 -DBR_AES_X86NI=0 -DBR_SSE2=0 -DBR_POWER8=0
+BEARSSL_SRC   = $(shell find third_party/bearssl/src -name '*.c')
+BEARSSL_OBJ   = $(patsubst third_party/bearssl/src/%.c,$(BUILD)/bearssl/%.o,$(BEARSSL_SRC))
+
+$(BUILD)/bearssl/%.o: third_party/bearssl/src/%.c
+	@mkdir -p $(dir $@)
+	@$(CC_K1K) $(CFLAGS_K1K) -w $(BEARSSL_FLAGS) -c $< -o $@
+
+$(BUILD)/bearssl/libbearssl.a: $(BEARSSL_OBJ)
+	@ar rcs $@ $(BEARSSL_OBJ)
+
+bearssl: $(BUILD)/bearssl/libbearssl.a
 
 libc: $(addprefix $(BUILD)/c/,$(C_PROGRAMS))
 
@@ -112,7 +130,8 @@ DISK_SERVICES = \
 	hello:HELLO.ELF:fs \
 	flaky:FLAKY.EOF:- \
 	sh:SH.ELF:fs,tty,console \
-	chello:CHELLO.ELF:fs,console
+	chello:CHELLO.ELF:fs,console \
+	netget:NETGET.ELF:console,net
 
 $(DISK): user libc
 	@mkdir -p $(BUILD)
@@ -158,7 +177,8 @@ test: test-iso $(DISK)
 		&& grep -q 'chello: /README.TXT says "K1K disk image' $(BUILD)/serial.log \
 		&& grep -q 'net\] ping 10.0.2.2: reply' $(BUILD)/serial.log \
 		&& grep -q 'net\] dhcp: leased 10.0.2.15' $(BUILD)/serial.log \
-		&& grep -q 'nettest\] http ok' $(BUILD)/serial.log \
+		&& grep -q 'netget: http ok' $(BUILD)/serial.log \
+		&& grep -q 'netget: https ok' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \

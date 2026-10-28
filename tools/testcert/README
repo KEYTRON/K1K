@@ -1,0 +1,3 @@
+Test-only EC P-256 key and self-signed certificate for the TLS test
+(tools/fixture-server.py serves HTTPS with them; user/c/tlsget pins the public
+key). They protect nothing and must never be used for anything else.

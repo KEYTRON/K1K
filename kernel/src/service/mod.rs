@@ -86,7 +86,6 @@ static NOTIFY: &[u8] = image!("notify");
 static REVOKE: &[u8] = image!("revoke");
 static BLK: &[u8] = image!("blk");
 static NET: &[u8] = image!("net");
-static NETTEST: &[u8] = image!("nettest");
 static FS: &[u8] = image!("fs");
 
 pub fn register(spec: ServiceSpec) -> Option<usize> {
@@ -219,14 +218,6 @@ pub fn init_builtin() {
             dynamic: false,
             args: b"",
         });
-        // First client of `net`: slot 0 = the request endpoint.
-        register(ServiceSpec {
-            name: "nettest",
-            image: NETTEST,
-            grants: alloc::vec![Grant::endpoint(&net_req, Rights::SEND)],
-            dynamic: false,
-            args: b"",
-        });
     } else {
         klog!("superv", "no virtio-net device found; no 'net' service");
     }
@@ -259,6 +250,8 @@ pub fn init_builtin() {
                 object: Object::Console,
                 rights: Rights::MAP_WRITE.union(Rights::GRANT),
             },
+            // Slot 6 = the network service's request endpoint, for `net` in a manifest.
+            Grant::endpoint(&net_req, Rights::SEND.union(Rights::GRANT)),
         ],
         dynamic: false,
         args: b"",
