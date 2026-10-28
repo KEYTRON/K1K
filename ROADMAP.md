@@ -94,6 +94,7 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on
 - [ ] WARP running on K1K itself: `warp install` on the target, not staged from a host (today `/SVC` is staged by `warp --root … --platform k1k-x86_64`)
 - [ ] Optional third-party antivirus: ClamAV (clearly marked as not ours) as a WARP package, and later a `scan` service that `fs`/WARP ask before a binary runs, Defender-style; needs the full libc and sockets
+- [ ] A `warp-init` service: at start K1OS compares what is in `/SVC` with the hashes in the latest signed index (`repos.json`), then fetches the delta or the full package over the network. Rules: boot from the disk as it is and never wait for the network; fetch in the background and switch activations at the next boot; a service that carries the system (`fs`, `blk`, `net`, `warp-init`) is updated side by side with a trial boot and a return to the last known good version (`warp rollback`); trust only the signed index, whose key is baked into the image. First step: report mismatches against a local index, no network
 - [ ] NVIDIA GPU driver as a ring-3 service on top of the GSP firmware (after the nova driver in Linux), delivered by WARP
 
 ## Scale
