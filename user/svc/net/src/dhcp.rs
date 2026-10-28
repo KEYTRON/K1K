@@ -2,8 +2,8 @@
 
 use k1k_rt::{sleep_ms, uptime_ns};
 
+use crate::stack::{UNSET, checksum, eth};
 use crate::virtio::Nic;
-use crate::{UNSET, checksum, eth};
 
 pub struct Lease {
     pub ip: [u8; 4],

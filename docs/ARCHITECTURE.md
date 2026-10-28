@@ -352,8 +352,7 @@ The kernel contains no device protocol and no file system:
 - `net`: a virtio-net driver (virtio 1.x, `1af4:1041`). It reads the device's PCI
   configuration space (`dev_config`) to find the common/notify/device register windows,
   maps their BARs, negotiates `VERSION_1` and the MAC, sets up a receive and a transmit
-  split queue in DMA pages, and polls. On top it speaks just enough Ethernet, DHCP (a client over raw UDP frames), ARP, IPv4 and
-  ICMP to lease an address, resolve the gateway and ping it. Sockets and a real stack come later.
+  split queue in DMA pages, and polls. On top sit `stack.rs` (Ethernet, ARP, IPv4, ICMP echo, UDP; every packet is routed via the gateway), `dhcp.rs` (lease over raw UDP frames) and `dns.rs` (an A-record stub resolver). The service pings the gateway, resolves a name and then keeps answering ARP and ping. Sockets and a real stack come later.
 - `blk`: an NVMe driver. It receives the controller as a `Device` capability,
   maps BAR0, asks for its MSI-X interrupt (`dev_irq`) and binds it to an
   endpoint *before* enabling the controller, allocates DMA pages for the admin

@@ -88,7 +88,8 @@ Stages go in order: `[x]` is done, `[ ]` is planned. The current stage is the fi
 - [ ] A fuller libc (musl is the candidate): POSIX file descriptors, `getenv`, `time`, `malloc` on real pages, sockets once there is a network stack
 - [x] A network driver: `net`, a virtio-net service in ring 3 (modern virtio over PCI capabilities, new syscall `dev_config`); resolves the gateway with ARP and pings it in `make test`
 - [x] DHCP client in `net`: leases the address, router and DNS server (checked in `make test`)
-- [ ] A network stack: IP/UDP/TCP as a service with sockets over IPC, DHCP and DNS
+- [x] `net` is a small stack of its own (Ethernet, ARP, IPv4, ICMP echo, UDP with checksums) and a DNS stub resolver; it stays up and answers ARP and ping. DNS is logged but not required by `make test` (CI may have no upstream resolver)
+- [ ] A network stack proper: IP/UDP/TCP as a service with sockets over IPC, DHCP and DNS
 - [ ] TLS and libcurl on K1K (needs the C library and networking), the last piece WARP depends on
 - [ ] WARP running on K1K itself: `warp install` on the target, not staged from a host (today `/SVC` is staged by `warp --root … --platform k1k-x86_64`)
 - [ ] Optional third-party antivirus: ClamAV (clearly marked as not ours) as a WARP package, and later a `scan` service that `fs`/WARP ask before a binary runs, Defender-style; needs the full libc and sockets
