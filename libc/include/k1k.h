@@ -26,6 +26,8 @@ int k1kc_net_connect(uint32_t ip_be, uint16_t port);
 long k1kc_net_send(const void *data, size_t len);
 long k1kc_net_recv(void *out, size_t max);
 void k1kc_net_close(void);
+/* name -> IPv4 address (big-endian in *ip_be); 0 or -1. */
+int k1kc_net_resolve(const char *name, size_t len, uint32_t *ip_be);
 /* NOT secure randomness: timing only, until K1K has an entropy source. */
 void k1kc_entropy(void *out, size_t len);
 

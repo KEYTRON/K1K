@@ -117,7 +117,7 @@ a FAT volume.
   over IPC into a client-provided DMA buffer; `fs` — read-only FAT12/16/32 on
   top of `blk`, doubling as init; `net` — a virtio-net driver in ring 3 (found by walking the
   PCI vendor capabilities, polled queues over DMA pages) that leases an address over DHCP, resolves the gateway with ARP and
-  pings it, resolves names, and speaks TCP to one client at a time over IPC; `netget`, a C program with BearSSL, fetches a file over HTTP and HTTPS from the host in `make test`;
+  pings it, resolves names, and speaks TCP to one client at a time over IPC; `netget`, a C program with BearSSL and the curl subset of `libc/curl`, fetches files over HTTP and HTTPS from the host in `make test`;
   `ping`/`pong` — request/reply over endpoints plus a shared page that `pong`
   grants to `ping` as a capability.
 - Services on the disk (`/SVC`): `hello`, which lists `/SVC` and reads

@@ -127,7 +127,7 @@ fn main() -> ! {
         None => log!("dns: no answer for keytron-prime.org"),
     }
 
-    serve(&mut net)
+    serve(&mut net, lease.dns)
 }
 
 /// Slot 0 is the device, slot 1 the request endpoint.
@@ -143,7 +143,7 @@ fn reply(to: Option<Cap>, status: u64, value: u64) {
 /// Answer ARP and ping, and serve the one client's TCP requests. Requests are
 /// handled start to finish (connect, send and recv wait on the network inside
 /// the handler), so there is a single connection and a single client for now.
-fn serve(net: &mut Stack) -> ! {
+fn serve(net: &mut Stack, dns_server: stack::Ip) -> ! {
     use netproto as p;
     let mut tcp = Tcp::new();
     let mut buf: Option<(*mut u8, usize)> = None;
@@ -190,6 +190,19 @@ fn serve(net: &mut Stack) -> ! {
                     Ok(n) => reply(reply_to, p::STATUS_OK, n as u64),
                     Err(Fail::Timeout) => reply(reply_to, p::STATUS_TIMEOUT, 0),
                     Err(_) => reply(reply_to, p::STATUS_ERR, 0),
+                }
+            }
+            p::RESOLVE => {
+                let (off, len) = (m.words[1] as usize, m.words[2] as usize);
+                let name = buf
+                    .filter(|(_, size)| off.saturating_add(len) <= *size && len <= 253)
+                    .and_then(|(ptr, _)| {
+                        let bytes = unsafe { core::slice::from_raw_parts(ptr.add(off), len) };
+                        core::str::from_utf8(bytes).ok()
+                    });
+                match name.and_then(|n| dns::resolve(net, dns_server, n)) {
+                    Some(ip) => reply(reply_to, p::STATUS_OK, u32::from_be_bytes(ip) as u64),
+                    None => reply(reply_to, p::STATUS_ERR, 0),
                 }
             }
             p::CLOSE => {

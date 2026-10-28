@@ -87,11 +87,11 @@ $(BUILD)/libc/libk1kc.a: $(LIBC_OBJ)
 $(LIBC_SYS): user
 	@test -f $@
 
-$(BUILD)/c/%: user/c/%/*.c $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/bearssl/libbearssl.a
+$(BUILD)/c/%: user/c/%/*.c $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/bearssl/libbearssl.a $(BUILD)/libc/libk1kcurl.a
 	@mkdir -p $(BUILD)/c
 	$(CC_K1K) $(CFLAGS_K1K) -Ithird_party/bearssl/inc -c user/c/$*/*.c -o $(BUILD)/c/$*.o
 	$(CC_K1K) -nostdlib -static -no-pie -Wl,-T,user/user.ld -Wl,-zmax-page-size=0x1000 -Wl,--gc-sections \
-		-o $@ $(BUILD)/c/$*.o $(BUILD)/bearssl/libbearssl.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
+		-o $@ $(BUILD)/c/$*.o $(BUILD)/libc/libk1kcurl.a $(BUILD)/bearssl/libbearssl.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
 
 # BearSSL (third_party/bearssl), vendored, for TLS. The system time and entropy
 # sources and the SSE/AES-NI paths do not exist in ring 3 on K1K, so they are
@@ -110,6 +110,14 @@ $(BUILD)/bearssl/libbearssl.a: $(BEARSSL_OBJ)
 	@ar rcs $@ $(BEARSSL_OBJ)
 
 bearssl: $(BUILD)/bearssl/libbearssl.a
+
+# The curl subset (libc/curl, headers in libc/include/curl): needs BearSSL.
+$(BUILD)/libc/curl.o: libc/curl/curl.c $(wildcard libc/include/curl/*.h)
+	@mkdir -p $(BUILD)/libc
+	$(CC_K1K) $(CFLAGS_K1K) -Ithird_party/bearssl/inc -c $< -o $@
+
+$(BUILD)/libc/libk1kcurl.a: $(BUILD)/libc/curl.o
+	@ar rcs $@ $<
 
 libc: $(addprefix $(BUILD)/c/,$(C_PROGRAMS))
 
@@ -179,6 +187,7 @@ test: test-iso $(DISK)
 		&& grep -q 'net\] dhcp: leased 10.0.2.15' $(BUILD)/serial.log \
 		&& grep -q 'netget: http ok' $(BUILD)/serial.log \
 		&& grep -q 'netget: https ok' $(BUILD)/serial.log \
+		&& grep -q 'netget: curl: ok' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \

@@ -162,6 +162,9 @@ pub mod netproto {
     /// (0 = the peer closed). Blocks until data, close or timeout.
     pub const RECV: u64 = 5;
     pub const CLOSE: u64 = 6;
+    /// Resolve the name of `w2` bytes at buffer offset `w1`; reply value = the
+    /// IPv4 address as a big-endian u32 (status `STATUS_ERR` if it has none).
+    pub const RESOLVE: u64 = 7;
     pub const STATUS_OK: u64 = 0;
     pub const STATUS_ERR: u64 = 1;
     pub const STATUS_TIMEOUT: u64 = 2;

@@ -10,6 +10,8 @@ case $cmd in
 start)
     mkdir -p "$dir/httpd"
     echo K1K-NET-OK > "$dir/httpd/k1k-net.txt"
+    mkdir -p "$dir/httpd/sub"
+    echo K1K-REDIR-OK > "$dir/httpd/sub/index.html"
     python3 "$(dirname "$0")/fixture-server.py" "$dir/httpd" > "$dir/httpd.log" 2>&1 &
     echo $! > "$dir/httpd.pid"
     # Wait until it listens.

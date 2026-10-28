@@ -283,3 +283,24 @@ pub unsafe extern "C" fn k1kc_entropy(out: *mut u8, len: usize) {
         }
     }
 }
+
+/// Resolve `name` (`len` bytes, no terminator) to an IPv4 address, stored
+/// big-endian in `*ip_be`. 0 on success, -1 otherwise.
+///
+/// # Safety
+/// `name` must be valid for `len` bytes and `ip_be` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn k1kc_net_resolve(name: *const u8, len: usize, ip_be: *mut u32) -> c_int {
+    let Some(l) = net_link() else { return -1 };
+    if len == 0 || len > 253 {
+        return -1;
+    }
+    unsafe { core::ptr::copy_nonoverlapping(name, l.buf, len) };
+    match net_ask(l, netproto::RESOLVE, 0, len as u64) {
+        Some((0, ip)) => {
+            unsafe { *ip_be = ip as u32 };
+            0
+        }
+        _ => -1,
+    }
+}

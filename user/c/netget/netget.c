@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <k1k.h>
+#include <curl/curl.h>
 #include "bearssl.h"
 
 #define HOST_IP 0x0A000202u /* 10.0.2.2, the host as QEMU's network shows it */
@@ -107,10 +108,78 @@ static int secure(void) {
     return check("https", n);
 }
 
+/* ---- the libcurl subset ---- */
+
+struct sink {
+    char data[1024];
+    size_t len;
+    int calls;
+};
+
+static size_t collect(char *p, size_t size, size_t n, void *user) {
+    struct sink *s = user;
+    size_t bytes = size * n;
+    if (s->len + bytes < sizeof s->data) {
+        memcpy(s->data + s->len, p, bytes);
+        s->len += bytes;
+        s->data[s->len] = 0;
+    }
+    return bytes;
+}
+
+static int progress(void *user, curl_off_t dt, curl_off_t dn, curl_off_t ut, curl_off_t un) {
+    (void)dt; (void)ut; (void)un;
+    ((struct sink *)user)->calls += dn > 0;
+    return 0;
+}
+
+static int fetch(const char *url, struct sink *s, int follow, int fail, int head, long *code) {
+    memset(s, 0, sizeof *s);
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "netget/1");
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, collect);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, s);
+    curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, progress);
+    curl_easy_setopt(h, CURLOPT_XFERINFODATA, s);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, (long)follow);
+    curl_easy_setopt(h, CURLOPT_FAILONERROR, (long)fail);
+    curl_easy_setopt(h, CURLOPT_NOBODY, (long)head);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, 20L);
+    int rc = curl_easy_perform(h);
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, code);
+    curl_easy_cleanup(h);
+    return rc;
+}
+
+static int curl_tests(void) {
+    struct sink s;
+    long code = 0;
+    int ok = 1;
+#define EXPECT(cond, what) do { if (!(cond)) { printf("netget: curl: FAILED %s\n", what); ok = 0; } } while (0)
+
+    int rc = fetch("http://10.0.2.2:18791/k1k-net.txt", &s, 0, 0, 0, &code);
+    EXPECT(rc == 0 && code == 200 && strstr(s.data, "K1K-NET-OK") && s.calls > 0, "http get with progress");
+    rc = fetch("https://10.0.2.2:18792/k1k-net.txt", &s, 0, 0, 0, &code);
+    EXPECT(rc == 0 && code == 200 && strstr(s.data, "K1K-NET-OK"), "https get");
+    rc = fetch("http://10.0.2.2:18791/k1k-net.txt", &s, 0, 0, 1, &code);
+    EXPECT(rc == 0 && code == 200 && s.len == 0, "head request");
+    rc = fetch("http://10.0.2.2:18791/missing", &s, 0, 1, 0, &code);
+    EXPECT(rc == CURLE_HTTP_RETURNED_ERROR && code == 404, "404 with failonerror");
+    rc = fetch("http://10.0.2.2:18791/sub", &s, 1, 1, 0, &code);
+    EXPECT(rc == 0 && code == 200 && strstr(s.data, "K1K-REDIR-OK"), "redirect followed");
+    rc = fetch("ftp://10.0.2.2/x", &s, 0, 0, 0, &code);
+    EXPECT(rc == CURLE_UNSUPPORTED_PROTOCOL, "unsupported scheme");
+    printf("netget: curl: %s\n", ok ? "ok" : "failed");
+    return ok;
+}
+
 int main(void) {
     int a = plain();
     if (a) printf("netget: http ok\n");
     int b = secure();
     if (b) printf("netget: https ok\n");
-    return a && b ? 0 : 1;
+    int c = curl_tests();
+    return a && b && c ? 0 : 1;
 }
