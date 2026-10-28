@@ -119,3 +119,15 @@ K1K runs only on x86_64 today: all platform code (GDT/IDT, APIC, ACPI) is writte
 - [ ] CI on aarch64
 - [ ] Apple Silicon: the AIC interrupt controller, boot through m1n1 and U-Boot
 - [ ] RISC-V (riscv64) — once there is real hardware to test on
+
+## Small known issues
+Rough edges noticed along the way; none blocks the current work, all are worth closing.
+- [ ] `uptime_ns()` is too coarse to time a network round trip (a ping measured "0 us"); a finer clock for services
+- [ ] `net` takes no interrupts: virtio queues are polled every millisecond; bind the device's MSI-X vector to the service endpoint
+- [ ] `net` has no routing table (everything goes through the gateway), no IPv4 fragmentation and no legacy (transitional) virtio-net support
+- [ ] `net` serves nobody yet: sockets over IPC come with TCP; a blocking `recv` without a non-blocking variant is why it polls
+- [ ] DNS is only logged by `make test` (CI may have no upstream resolver); a local resolver on the host side would let the test require it
+- [ ] `make test-kvm` is not run in CI after the shell, libc and network changes
+- [ ] WARP 0.4.12 is published for x86_64 only: aarch64 (OrbStack on the Mac), Termux (android_aarch64) and macOS builds are still 0.4.9
+- [ ] The GitVerse raw index link of the `k1os` WARP repository has not been checked with the client
+- [ ] Uncommitted `ci/runner/*` changes in K1OS belong to another project's runner and wait for the owner's decision
