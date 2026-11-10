@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <k1k.h>
 
 static int by_value(const void *a, const void *b) {
     int x = *(const int *)a, y = *(const int *)b;
@@ -44,6 +48,43 @@ int main(void) {
         printf("chello: /README.TXT says \"%s\"\n", first);
     }
     fclose(f);
+
+    /* The writable FAT16 API from C: mkdir/unlink/rename wear their POSIX
+       names, creating a file with its content is the K1K-specific
+       k1kc_create. Names are pre-cleaned and a directory from a previous
+       boot of the same image is fine, like the fatwrite service does. */
+    const char *dir = "/CHELLO", *a = "/CHELLO/A.TXT", *b = "/CHELLO/B.TXT";
+    unlink(a);
+    unlink(b);
+    if (mkdir(dir, 0) != 0 && errno != EEXIST) {
+        printf("chello: mkdir %s: errno %d\n", dir, errno);
+        return 1;
+    }
+    if (k1kc_create(a, strlen(a), "hello, FAT16", 12, 0) != 0) {
+        printf("chello: create %s failed\n", a);
+        return 1;
+    }
+    if (rename(a, b) != 0) {
+        printf("chello: rename: errno %d\n", errno);
+        return 1;
+    }
+    f = fopen(b, "r");
+    if (!f) {
+        printf("chello: cannot reopen %s\n", b);
+        return 1;
+    }
+    char back[16] = { 0 };
+    size_t got = fread(back, 1, 12, f);
+    fclose(f);
+    if (got != 12 || memcmp(back, "hello, FAT16", 12) != 0) {
+        printf("chello: read back \"%s\"\n", back);
+        return 1;
+    }
+    if (unlink(b) != 0) {
+        printf("chello: unlink: errno %d\n", errno);
+        return 1;
+    }
+    printf("chello: writes: ok\n");
     printf("chello: done\n");
     return 0;
 }

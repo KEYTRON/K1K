@@ -19,6 +19,18 @@ void k1kc_free(void *ptr, size_t size);
 int k1kc_load(const char *path, size_t path_len, unsigned char **out, size_t *out_len);
 void k1kc_unload(unsigned char *ptr, size_t len);
 
+/* The writable FAT16 compatibility API, one directory level at a time with
+   8.3 names; needs the fs capability. All four share one contract:
+   0 on success; on refusal the fsproto status (1 no such file, 2 is a
+   directory, 3 not a directory, 6 invalid name, 7 no space left,
+   10 the name already exists, ...); -1 without an fs capability, -2 when
+   the service cannot be reached. There is no rmdir and no cross-directory
+   rename; move = create + unlink. */
+int k1kc_mkdir(const char *path, size_t path_len);
+int k1kc_create(const char *path, size_t path_len, const void *data, size_t data_len, int replace);
+int k1kc_unlink(const char *path, size_t path_len);
+int k1kc_rename(const char *old_path, size_t old_len, const char *new_path, size_t new_len);
+
 /* TCP through the `net` service (needs the `net` capability in the manifest).
    connect: 0, or a positive net status (2 timeout, 3 refused), negative without
    the capability. recv: count, 0 = the peer closed, -1 error, -2 timeout. */

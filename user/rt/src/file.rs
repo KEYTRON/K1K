@@ -211,12 +211,15 @@ impl FileClient {
     }
 
     /// Create one subdirectory. The parent must exist and the name must be a
-    /// free 8.3 name.
-    pub fn mkdir(&self, path: &str) -> Result<()> {
-        let off = self.put_path(path)?;
-        let r = self.request(MKDIR, &[off, path.len() as u64], 0)?;
+    /// free 8.3 name. On refusal the error is the fsproto status ([`EXISTS`],
+    /// [`NOENT`], ...), so callers can tell "already there" from "no parent".
+    pub fn mkdir(&self, path: &str) -> core::result::Result<(), u64> {
+        let off = self.put_path(path).map_err(|_| INVAL)?;
+        let r = self
+            .request(MKDIR, &[off, path.len() as u64], 0)
+            .map_err(|_| NOCONN)?;
         if r[0] != OK {
-            return Err(Error::Inval);
+            return Err(r[0]);
         }
         Ok(())
     }
@@ -224,67 +227,74 @@ impl FileClient {
     /// Create an 8.3 file in any existing directory. With `replace` an
     /// existing regular file is swapped atomically — after a crash the old or
     /// the new content is visible, never a mix; a missing name is simply
-    /// created. Without it an existing name is refused.
-    pub fn create(&self, path: &str, data: &[u8], replace: bool) -> Result<()> {
+    /// created. Without it an existing name is refused with [`EXISTS`]. The
+    /// error is the fsproto status.
+    pub fn create(&self, path: &str, data: &[u8], replace: bool) -> core::result::Result<(), u64> {
         if !path.starts_with('/') {
-            return Err(Error::Inval);
+            return Err(INVAL);
         }
-        let path_off = self.put_path(path)?;
+        let path_off = self.put_path(path).map_err(|_| INVAL)?;
         if data.len() > u32::MAX as usize || CREATE_DATA_OFF + data.len() > self.len {
-            return Err(Error::NoMem);
+            return Err(NOSPC);
         }
         let shared = unsafe { view(self.base, self.len) };
         shared[CREATE_DATA_OFF..CREATE_DATA_OFF + data.len()].copy_from_slice(data);
         let flags = if replace { CREATE_REPLACE } else { 0 };
-        let r = self.request(
-            CREATE,
-            &[
-                path_off,
-                path.len() as u64,
-                CREATE_DATA_OFF as u64,
-                data.len() as u64,
-                flags,
-            ],
-            0,
-        )?;
+        let r = self
+            .request(
+                CREATE,
+                &[
+                    path_off,
+                    path.len() as u64,
+                    CREATE_DATA_OFF as u64,
+                    data.len() as u64,
+                    flags,
+                ],
+                0,
+            )
+            .map_err(|_| NOCONN)?;
         if r[0] != OK {
-            return Err(Error::Inval);
+            return Err(r[0]);
         }
         Ok(())
     }
 
     /// Remove one regular file. Directories are refused: there is no rmdir.
-    pub fn unlink(&self, path: &str) -> Result<()> {
-        let off = self.put_path(path)?;
-        let r = self.request(UNLINK, &[off, path.len() as u64], 0)?;
+    /// The error is the fsproto status.
+    pub fn unlink(&self, path: &str) -> core::result::Result<(), u64> {
+        let off = self.put_path(path).map_err(|_| INVAL)?;
+        let r = self
+            .request(UNLINK, &[off, path.len() as u64], 0)
+            .map_err(|_| NOCONN)?;
         if r[0] != OK {
-            return Err(Error::Inval);
+            return Err(r[0]);
         }
         Ok(())
     }
 
-    /// Rename within one directory; the new name must not exist. Moving
-    /// between directories is a create plus an unlink, not a rename.
-    pub fn rename(&self, old: &str, new: &str) -> Result<()> {
+    /// Rename within one directory; the new name must not exist ([`EXISTS`]).
+    /// Moving between directories is a create plus an unlink, not a rename.
+    /// The error is the fsproto status.
+    pub fn rename(&self, old: &str, new: &str) -> core::result::Result<(), u64> {
         if !old.starts_with('/') || !new.starts_with('/') || new.len() > MAX_PATH {
-            return Err(Error::Inval);
+            return Err(INVAL);
         }
-        let old_off = self.put_path(old)?;
+        let old_off = self.put_path(old).map_err(|_| INVAL)?;
         // The second path shares the data area with create payloads; rename
         // carries no payload, so the space is free to use.
         let new_off = CREATE_DATA_OFF;
         let buf = unsafe { view(self.base, self.len) };
-        let dst = buf
-            .get_mut(new_off..new_off + new.len())
-            .ok_or(Error::NoMem)?;
+        let dst = buf.get_mut(new_off..new_off + new.len()).ok_or(NOSPC)?;
         dst.copy_from_slice(new.as_bytes());
-        let r = self.request(
-            RENAME,
-            &[old_off, old.len() as u64, new_off as u64, new.len() as u64],
-            0,
-        )?;
+        let r = self
+            .request(
+                RENAME,
+                &[old_off, old.len() as u64, new_off as u64, new.len() as u64],
+                0,
+            )
+            .map_err(|_| NOCONN)?;
         if r[0] != OK {
-            return Err(Error::Inval);
+            return Err(r[0]);
         }
         Ok(())
     }

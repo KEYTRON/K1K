@@ -28,4 +28,5 @@ FILE *fopen(const char *path, const char *mode);
 int fclose(FILE *f);
 int feof(FILE *f);
 long ftell(FILE *f);
+int rename(const char *old_path, const char *new_path);
 #endif

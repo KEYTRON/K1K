@@ -84,7 +84,7 @@ WARP_SRC := $(if $(strip $(WARP_SRC)),$(WARP_SRC),$(abspath $(CURDIR)/../WARP))
 WARP_VENDOR = $(WARP_SRC)/src/vendor
 WARP_CRYPTO = $(BUILD)/warp/monocypher.o $(BUILD)/warp/monocypher-ed25519.o
 
-$(BUILD)/libc/%.o: libc/src/%.c $(wildcard libc/include/*.h)
+$(BUILD)/libc/%.o: libc/src/%.c $(shell find libc/include -name '*.h')
 	@mkdir -p $(BUILD)/libc
 	$(CC_K1K) $(CFLAGS_K1K) -c $< -o $@
 
@@ -229,6 +229,7 @@ test: test-iso $(DISK) test-fat
 		&& grep -q 'warpcheck: tampered index: refused' $(BUILD)/serial.log \
 		&& grep -q 'fatwrite: root create/read: ok' $(BUILD)/serial.log \
 		&& grep -q 'fatwrite: mkdir/replace/rename/unlink: ok' $(BUILD)/serial.log \
+		&& grep -q 'chello: writes: ok' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \

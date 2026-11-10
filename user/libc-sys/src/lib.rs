@@ -19,8 +19,8 @@ use core::cell::UnsafeCell;
 use k1k_rt::file::FileClient;
 
 use k1k_rt::{
-    Cap, console_write, ep_create, granted, info, log_bytes, mem_create, mem_map, netproto, recv,
-    rights, send, send_cap,
+    Cap, console_write, ep_create, fsproto, granted, info, log_bytes, mem_create, mem_map,
+    netproto, recv, rights, send, send_cap,
 };
 
 unsafe extern "C" {
@@ -161,6 +161,97 @@ pub unsafe extern "C" fn k1kc_unload(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
         drop(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len)) });
     }
+}
+
+/// The writable FAT16 compatibility API (mkdir/create/unlink/rename), shared
+/// contract of the four calls below: 0 on success; on refusal the fsproto
+/// status ([`fsproto::NOENT`], [`fsproto::EXISTS`], ...), so a C caller can
+/// tell an existing name from a missing parent; -1 without an `fs`
+/// capability, -2 when the file service cannot be reached. One short
+/// connection per call, like [`k1kc_load`]: the service takes one client at a
+/// time.
+fn with_fs(op: impl FnOnce(&mut FileClient) -> core::result::Result<(), u64>) -> c_int {
+    let Some(ep) = granted("fs") else {
+        return -1;
+    };
+    let Ok(mut fs) = FileClient::new(Cap(ep.0), 16) else {
+        return -2;
+    };
+    let r = op(&mut fs);
+    fs.disconnect();
+    match r {
+        Ok(()) => 0,
+        Err(status) => status as c_int,
+    }
+}
+
+fn fs_path<'a>(path: *const u8, path_len: usize) -> Option<&'a str> {
+    core::str::from_utf8(unsafe { core::slice::from_raw_parts(path, path_len) }).ok()
+}
+
+/// Create one subdirectory (8.3 name, the parent must exist).
+///
+/// # Safety
+/// `path` must be valid for `path_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn k1kc_mkdir(path: *const u8, path_len: usize) -> c_int {
+    let Some(path) = fs_path(path, path_len) else {
+        return fsproto::INVAL as c_int;
+    };
+    with_fs(|fs| fs.mkdir(path))
+}
+
+/// Create an 8.3 file in any existing directory, with the whole content in
+/// one call; `replace` swaps an existing regular file atomically.
+///
+/// # Safety
+/// `path` must be valid for `path_len` bytes; `data` for `data_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn k1kc_create(
+    path: *const u8,
+    path_len: usize,
+    data: *const u8,
+    data_len: usize,
+    replace: c_int,
+) -> c_int {
+    let Some(path) = fs_path(path, path_len) else {
+        return fsproto::INVAL as c_int;
+    };
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(data, data_len) }
+    };
+    with_fs(|fs| fs.create(path, data, replace != 0))
+}
+
+/// Remove one regular file. Directories are refused: there is no rmdir.
+///
+/// # Safety
+/// `path` must be valid for `path_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn k1kc_unlink(path: *const u8, path_len: usize) -> c_int {
+    let Some(path) = fs_path(path, path_len) else {
+        return fsproto::INVAL as c_int;
+    };
+    with_fs(|fs| fs.unlink(path))
+}
+
+/// Rename within one directory; the new name must not exist.
+///
+/// # Safety
+/// Both paths must be valid for their lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn k1kc_rename(
+    old_path: *const u8,
+    old_len: usize,
+    new_path: *const u8,
+    new_len: usize,
+) -> c_int {
+    let (Some(old), Some(new)) = (fs_path(old_path, old_len), fs_path(new_path, new_len)) else {
+        return fsproto::INVAL as c_int;
+    };
+    with_fs(|fs| fs.rename(old, new))
 }
 
 /// One client connection to the `net` service: its request endpoint, our reply
