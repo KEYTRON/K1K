@@ -10,6 +10,9 @@ case $cmd in
 start)
     mkdir -p "$dir/httpd"
     echo K1K-NET-OK > "$dir/httpd/k1k-net.txt"
+    # RFC 8032 section 7.1 fixture key; it is never a release credential.
+    printf '%s' '{"k1k-demo":{"builds":{"k1k-x86_64":{"version":"0.1"}}}}' > "$dir/httpd/warp-index.json"
+    printf '%s\n' 'i03jou7Hf06WSC1bKILZBDCU6ahEJneu5oR453BU6dxMRytG/P/XyZaadiydPKR7zzzF/f9yMVJZ2mihIt9hDQ==' > "$dir/httpd/warp-index.json.sig"
     mkdir -p "$dir/httpd/sub"
     echo K1K-REDIR-OK > "$dir/httpd/sub/index.html"
     python3 "$(dirname "$0")/fixture-server.py" "$dir/httpd" > "$dir/httpd.log" 2>&1 &

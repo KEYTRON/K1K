@@ -31,7 +31,7 @@ else
   KERNEL_ELF = kernel/target/x86_64-unknown-none/debug/k1k
 endif
 
-.PHONY: libc bearssl test-libc all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
+.PHONY: libc bearssl test-libc test-fat all user kernel iso test-iso disk run run-bios run-uefi test test-shell test-heap clean distclean limine fmt clippy
 
 all: iso
 
@@ -75,7 +75,14 @@ CFLAGS_K1K = -O2 -Wall -Wextra -ffreestanding -fno-builtin -fno-tree-loop-distri
              -nostdinc -isystem libc/include -isystem $(shell $(CC_K1K) -print-file-name=include)
 LIBC_OBJ   = $(patsubst libc/src/%.c,$(BUILD)/libc/%.o,$(wildcard libc/src/*.c))
 LIBC_SYS   = $(USER_BIN)/libk1kc_sys.a
-C_PROGRAMS = chello netget
+C_PROGRAMS = chello netget warpcheck
+
+# WARP's Ed25519 verifier is deliberately linked only into warpcheck. The
+# implementation is consumed from the WARP checkout which already stages the
+# disk, so K1K does not grow a second, drifting crypto copy.
+WARP_SRC := $(if $(strip $(WARP_SRC)),$(WARP_SRC),$(abspath $(CURDIR)/../WARP))
+WARP_VENDOR = $(WARP_SRC)/src/vendor
+WARP_CRYPTO = $(BUILD)/warp/monocypher.o $(BUILD)/warp/monocypher-ed25519.o
 
 $(BUILD)/libc/%.o: libc/src/%.c $(wildcard libc/include/*.h)
 	@mkdir -p $(BUILD)/libc
@@ -89,9 +96,21 @@ $(LIBC_SYS): user
 
 $(BUILD)/c/%: user/c/%/*.c $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/bearssl/libbearssl.a $(BUILD)/libc/libk1kcurl.a
 	@mkdir -p $(BUILD)/c
-	$(CC_K1K) $(CFLAGS_K1K) -Ithird_party/bearssl/inc -c user/c/$*/*.c -o $(BUILD)/c/$*.o
+	$(CC_K1K) $(CFLAGS_K1K) -Ithird_party/bearssl/inc $(CFLAGS_EXTRA) -c user/c/$*/*.c -o $(BUILD)/c/$*.o
 	$(CC_K1K) -nostdlib -static -no-pie -Wl,-T,user/user.ld -Wl,-zmax-page-size=0x1000 -Wl,--gc-sections \
-		-o $@ $(BUILD)/c/$*.o $(BUILD)/libc/libk1kcurl.a $(BUILD)/bearssl/libbearssl.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
+		-o $@ $(BUILD)/c/$*.o $(EXTRA_OBJ) $(BUILD)/libc/libk1kcurl.a $(BUILD)/bearssl/libbearssl.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a $(LIBC_SYS) $(BUILD)/libc/libk1kc.a
+
+$(BUILD)/c/warpcheck: CFLAGS_EXTRA = -I$(WARP_VENDOR)
+$(BUILD)/c/warpcheck: EXTRA_OBJ = $(WARP_CRYPTO)
+$(BUILD)/c/warpcheck: $(WARP_CRYPTO)
+
+$(BUILD)/warp/monocypher.o: $(WARP_VENDOR)/monocypher.c $(WARP_VENDOR)/monocypher.h
+	@mkdir -p $(dir $@)
+	$(CC_K1K) $(CFLAGS_K1K) -I$(WARP_VENDOR) -c $< -o $@
+
+$(BUILD)/warp/monocypher-ed25519.o: $(WARP_VENDOR)/monocypher-ed25519.c $(WARP_VENDOR)/monocypher-ed25519.h $(WARP_VENDOR)/monocypher.h
+	@mkdir -p $(dir $@)
+	$(CC_K1K) $(CFLAGS_K1K) -I$(WARP_VENDOR) -c $< -o $@
 
 # BearSSL (third_party/bearssl), vendored, for TLS. The system time and entropy
 # sources and the SSE/AES-NI paths do not exist in ring 3 on K1K, so they are
@@ -139,7 +158,9 @@ DISK_SERVICES = \
 	flaky:FLAKY.EOF:- \
 	sh:SH.ELF:fs,tty,console \
 	chello:CHELLO.ELF:fs,console \
-	netget:NETGET.ELF:console,net
+	netget:NETGET.ELF:console,net \
+	warpcheck:WARPCHK.ELF:console,net \
+	fatwrite:FATWRITE.ELF:fs,console
 
 $(DISK): user libc
 	@mkdir -p $(BUILD)
@@ -152,6 +173,22 @@ $(DISK): user libc
 	mdir -i $(DISK) ::/SVC
 
 disk: $(DISK)
+
+# This uses the exact FAT implementation compiled into fs, but runs against
+# a scratch copy of the newly produced image on the host: the QEMU boot test
+# later uses the original image, so the regression must not leave its own
+# files (WARP.TST, DIR1) behind for the guest to trip over. It exercises
+# FAT16 allocation, both FAT mirrors, zeroing, free/remount, the
+# compatibility API and the end-of-directory handling before QEMU sees the
+# image.
+FAT_TEST = $(BUILD)/fat16-test
+$(FAT_TEST): tools/fat16-test.rs user/svc/fs/src/fat.rs
+	@mkdir -p $(BUILD)
+	rustc --edition=2024 -O $< -o $@
+
+test-fat: $(DISK) $(FAT_TEST)
+	cp $(DISK) $(BUILD)/fat-test.img
+	$(FAT_TEST) $(BUILD)/fat-test.img
 
 run: run-bios
 
@@ -167,7 +204,7 @@ run-uefi: iso $(DISK)
 # few seconds and exits QEMU with status 33 (success) via isa-debug-exit.
 # The serial log must show fs mounting the disk, starting the manifest and
 # serving a real file read to a service that got no memory address of its own.
-test: test-iso $(DISK)
+test: test-iso $(DISK) test-fat
 	@rm -f $(BUILD)/serial.log
 	@sh tools/http-fixture.sh start $(BUILD)
 	@timeout 90 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
@@ -188,12 +225,17 @@ test: test-iso $(DISK)
 		&& grep -q 'netget: http ok' $(BUILD)/serial.log \
 		&& grep -q 'netget: https ok' $(BUILD)/serial.log \
 		&& grep -q 'netget: curl: ok' $(BUILD)/serial.log \
+		&& grep -q 'warpcheck: signed k1k-x86_64 index: ok' $(BUILD)/serial.log \
+		&& grep -q 'warpcheck: tampered index: refused' $(BUILD)/serial.log \
+		&& grep -q 'fatwrite: root create/read: ok' $(BUILD)/serial.log \
+		&& grep -q 'fatwrite: mkdir/replace/rename/unlink: ok' $(BUILD)/serial.log \
 		&& grep -q 'chello: done' $(BUILD)/serial.log \
 		&& grep -q "started 'hello' from /SVC/HELLO.ELF" $(BUILD)/serial.log \
 		&& grep -q "started 'flaky' from /SVC/FLAKY.EOF" $(BUILD)/serial.log \
 		&& grep -q 'fs\] serving files' $(BUILD)/serial.log \
 		&& grep -q 'hello\] /SVC holds' $(BUILD)/serial.log \
-		&& grep -q 'hello\] /README.TXT:' $(BUILD)/serial.log
+		&& grep -q 'hello\] /README.TXT:' $(BUILD)/serial.log \
+		&& $(FAT_TEST) $(DISK) verify-write
 
 # The shell, typed to through the emulated keyboard: kbd (ring 3) decodes the
 # keys and sends them to sh, which answers on the console. Needs socat.
