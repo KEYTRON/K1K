@@ -16,7 +16,8 @@
 //!   block numbers multiply by 8 to become LBAs.
 //! - **Superblock slots**: block 0 (slot A) and block 1 (slot B), one 4 KiB
 //!   block each. A commit writes the *other* slot with `generation + 1` and
-//!   only that publish switches the volume root.
+//!   only that publish switches the volume root. Blocks from 2 up are
+//!   copy-on-write payload, handed out by the in-memory allocator.
 //! - **Superblock header** is the first 1024 bytes of the block, little-endian,
 //!   the rest of the block is zero:
 //!
@@ -55,6 +56,8 @@
 //! `tools/k1fs-test.rs` builds this file the same way `tools/fat16-test.rs`
 //! builds `fat.rs`; the ring-3 K1FS service wires it into the manifest later.
 
+use alloc::vec::Vec;
+
 use crate::fat::BlockDevice;
 
 /// Logical block size; all K1FS structures are whole blocks.
@@ -70,6 +73,9 @@ pub const HEADER_SIZE: usize = 1024;
 /// Slot A lives in block 0, slot B in block 1.
 pub const SLOT_A_BLOCK: u64 = 0;
 pub const SLOT_B_BLOCK: u64 = 1;
+/// Blocks 0 and 1 are the superblock slots; everything from here on is
+/// ordinary CoW payload, allocated from the in-memory map.
+pub const FIRST_DATA_BLOCK: u64 = 2;
 /// Smallest device mkfs accepts: the two superblock slots plus room to work.
 pub const MIN_BLOCKS: u64 = 8;
 /// `root_block` of a volume that has no root directory yet.
@@ -94,6 +100,8 @@ pub enum K1fsErr {
     NoSuperblock,
     /// Geometry that cannot be: smaller than MIN_BLOCKS or past the device.
     Inval,
+    /// The volume has no free block left.
+    NoSpc,
 }
 
 /// The decoded superblock header: everything mount needs to choose a root.
@@ -105,12 +113,31 @@ pub struct Superblock {
     pub log_block_size: u32,
 }
 
-/// A mounted K1FS volume: the winning superblock and which slot it came from
+/// A mounted K1FS volume: the winning superblock, which slot it came from
 /// (`b'A'` or `b'B'` — the regression asserts the fallback picked the right
-/// one).
+/// one) and the in-memory allocation map.
+///
+/// # The allocator is pure copy-on-write
+///
+/// There is no allocation bitmap on disk. Mount derives the used set from
+/// the committed state — today the superblock slots and `root_block`, the
+/// tree walk of slice 3+ — and every other block is free. `alloc` hands out
+/// free blocks from that map, `free` returns them before a commit. Two
+/// consequences, both wanted:
+///
+/// - After a commit, the old version's exclusive blocks are unreachable
+///   from the new root and become free space again — garbage collection is
+///   not a facility, it is the CoW invariant.
+/// - A crash mid-commit writes blocks nothing reachable points at; the old
+///   superblock still mounts and sees them as free. The worst failure is a
+///   few dead blocks, never double ownership.
+///
+/// The map is RAM-only (`total_blocks` bits), which the "bounded RAM" goal
+/// accepts: the K1K volumes this serves stay in the thousands of blocks.
 pub struct K1fs {
     pub sb: Superblock,
     pub slot: u8,
+    used: Vec<u64>,
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -278,10 +305,85 @@ impl K1fs {
                 best = Some((sb, slot));
             }
         }
-        match best {
-            Some((sb, slot)) => Ok(K1fs { sb, slot }),
-            None if bad_geometry => Err(K1fsErr::Inval),
-            None => Err(K1fsErr::NoSuperblock),
+        let (sb, slot) = match best {
+            Some(best) => best,
+            None if bad_geometry => return Err(K1fsErr::Inval),
+            None => return Err(K1fsErr::NoSuperblock),
+        };
+        let mut fs = K1fs {
+            sb,
+            slot,
+            used: vec![0u64; ((sb.total_blocks + 63) / 64) as usize],
+        };
+        fs.set_used(SLOT_A_BLOCK);
+        fs.set_used(SLOT_B_BLOCK);
+        if sb.root_block != ROOT_NONE {
+            if sb.root_block < FIRST_DATA_BLOCK || sb.root_block >= sb.total_blocks {
+                return Err(K1fsErr::Inval);
+            }
+            fs.set_used(sb.root_block);
         }
+        Ok(fs)
+    }
+
+    fn is_used_bit(&self, block: u64) -> bool {
+        self.used[(block / 64) as usize] & (1u64 << (block % 64)) != 0
+    }
+
+    fn set_used(&mut self, block: u64) {
+        self.used[(block / 64) as usize] |= 1u64 << (block % 64);
+    }
+
+    /// Whether `block` is handed out. Slot blocks always are.
+    pub fn is_used(&self, block: u64) -> bool {
+        block < self.sb.total_blocks && self.is_used_bit(block)
+    }
+
+    /// Hand out one free data block, the lowest-numbered free block there is
+    /// — mkfs-sized volumes stay deterministic in the regression.
+    pub fn alloc(&mut self) -> Result<u64, K1fsErr> {
+        for block in FIRST_DATA_BLOCK..self.sb.total_blocks {
+            if !self.is_used_bit(block) {
+                self.set_used(block);
+                return Ok(block);
+            }
+        }
+        Err(K1fsErr::NoSpc)
+    }
+
+    /// Return a data block to the pool. Only meaningful before the commit
+    /// that drops the last reference; freeing a slot block is refused.
+    pub fn free(&mut self, block: u64) {
+        if block >= FIRST_DATA_BLOCK && block < self.sb.total_blocks {
+            self.used[(block / 64) as usize] &= !(1u64 << (block % 64));
+        }
+    }
+
+    /// Publish `root_block` (or [`ROOT_NONE`] for an emptied volume) as the
+    /// new root: the *other* superblock slot gets `generation + 1`. A crash
+    /// before the slot write lands leaves the previous slot authoritative —
+    /// that is the whole transaction.
+    pub fn commit(&mut self, dev: &mut impl BlockDevice, root_block: u64) -> Result<(), K1fsErr> {
+        if root_block != ROOT_NONE
+            && (root_block < FIRST_DATA_BLOCK || root_block >= self.sb.total_blocks)
+        {
+            return Err(K1fsErr::Inval);
+        }
+        let (slot, slot_block) = match self.slot {
+            b'A' => (b'B', SLOT_B_BLOCK),
+            _ => (b'A', SLOT_A_BLOCK),
+        };
+        let sb = Superblock {
+            generation: self.sb.generation + 1,
+            root_block,
+            total_blocks: self.sb.total_blocks,
+            log_block_size: self.sb.log_block_size,
+        };
+        let mut raw = [0u8; BLOCK];
+        sb.encode(&mut raw);
+        write_block(dev, slot_block, &raw)?;
+        self.sb = sb;
+        self.slot = slot;
+        Ok(())
     }
 }

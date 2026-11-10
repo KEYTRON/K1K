@@ -160,5 +160,72 @@ fn main() {
     );
     println!("k1fs: geometry bounds: ok");
 
-    println!("k1fs: all superblock checks passed");
+    // 7. The CoW allocator: distinct data blocks, never a superblock slot.
+    K1fs::mkfs(&mut disk, blocks).expect("mkfs for allocator tests");
+    let mut fs = K1fs::mount(&mut disk, blocks).expect("mount for allocator tests");
+    let a = fs.alloc().expect("alloc a");
+    let b = fs.alloc().expect("alloc b");
+    let c = fs.alloc().expect("alloc c");
+    assert!(
+        a < b && b < c,
+        "allocation must be deterministic and distinct"
+    );
+    assert!(
+        a >= k1fs::FIRST_DATA_BLOCK && fs.is_used(a) && fs.is_used(b) && fs.is_used(c),
+        "allocated blocks must come from the data range and be marked used"
+    );
+    assert!(fs.is_used(k1fs::SLOT_A_BLOCK) && fs.is_used(k1fs::SLOT_B_BLOCK));
+    println!("k1fs: allocator hands out distinct data blocks: ok");
+
+    // 8. Commit publishes the new root in the other slot; a fresh mount sees
+    //    the new generation, the flipped slot and the occupied root.
+    let slot_before = fs.slot;
+    fs.commit(&mut disk, a).expect("commit root a");
+    assert_eq!(fs.sb.generation, 2);
+    assert_ne!(fs.slot, slot_before, "commit must flip the slot");
+    let mut fs = K1fs::mount(&mut disk, blocks).expect("remount after commit");
+    let flipped = if slot_before == b'A' { b'B' } else { b'A' };
+    assert_eq!(
+        fs.slot, flipped,
+        "remount must pick the freshly written slot"
+    );
+    assert_eq!(fs.sb.generation, 2);
+    assert_eq!(
+        fs.sb.root_block, a,
+        "committed root must survive the remount"
+    );
+    assert!(fs.is_used(a), "the committed root block stays used");
+    let d = fs.alloc().expect("alloc after commit");
+    assert_ne!(d, a, "the committed root must not be handed out again");
+    println!("k1fs: commit publishes the new root: ok");
+
+    // 9. Freed blocks return to the pool after the commit that drops them.
+    let mut fs = fs;
+    fs.free(a);
+    fs.commit(&mut disk, k1fs::ROOT_NONE)
+        .expect("commit empty root");
+    let mut fs = K1fs::mount(&mut disk, blocks).expect("remount after free");
+    assert_eq!(fs.sb.root_block, k1fs::ROOT_NONE);
+    assert!(!fs.is_used(a), "the freed root is free again after remount");
+    assert_eq!(
+        fs.alloc().expect("realloc the freed block"),
+        a,
+        "the freed block must be allocatable again"
+    );
+    println!("k1fs: freed blocks return to the pool: ok");
+
+    // 10. Exhaustion reports NoSpc: a volume of MIN_BLOCKS has total-2
+    //     allocatable blocks and not one more.
+    K1fs::mkfs(&mut disk, k1fs::MIN_BLOCKS).expect("mkfs tiny volume");
+    let mut tiny = K1fs::mount(&mut disk, blocks).expect("mount tiny volume");
+    for _ in k1fs::FIRST_DATA_BLOCK..k1fs::MIN_BLOCKS {
+        tiny.alloc().expect("alloc within capacity");
+    }
+    assert!(
+        matches!(tiny.alloc(), Err(K1fsErr::NoSpc)),
+        "alloc past capacity must be NoSpc"
+    );
+    println!("k1fs: exhaustion reports NoSpc: ok");
+
+    println!("k1fs: all superblock and allocator checks passed");
 }
