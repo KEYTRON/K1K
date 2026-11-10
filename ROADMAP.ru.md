@@ -86,6 +86,30 @@
 - [x] DHCP-клиент в `net`: получает адрес, роутер и DNS (проверяется в `make test`)
 - [x] У `net` теперь свой небольшой стек (Ethernet, ARP, IPv4, ICMP echo, UDP с контрольными суммами) и DNS-резолвер; сервис остаётся жить и отвечает на ARP и ping. DNS только пишется в лог, `make test` его не требует (в CI может не быть внешнего резолвера)
 - [x] TCP-клиент в `net` (одно соединение, приём по порядку, отправка с повтором) и сокетоподобный IPC-протокол (`netproto`); сервис `nettest` в `make test` скачивает файл по HTTP с хоста; неблокирующий `recv` (сисколл 5, `nonblock`)
+- [x] Writable compatibility volume, первый безопасный срез: FAT16 создаёт
+  новый root 8.3-файл через IPC `fs → blk → NVMe`; FAT-chain/payload пишутся
+  до directory entry, а `make test` после QEMU заново монтирует образ и
+  проверяет запись. Это не общий POSIX API и не WARP store.
+- [x] FAT16 compatibility API: подкаталоги, controlled replace, unlink и
+  rename с явно описанной crash-семантикой. Порядок записей задокументирован
+  в `user/svc/fs/src/fat.rs`: приватное состояние FAT и полезная нагрузка
+  пишутся до публикации directory entry (create/mkdir), при replace запись
+  перенаправляется одним секторным write, а старая цепочка освобождается
+  после; unlink сначала помечает имя удалённым и лишь потом освобождает
+  цепочку, поэтому сбой питания теряет кластеры, но не оставляет висячую
+  запись. IPC-опкоды `MKDIR`/`CREATE` (с флагом `CREATE_REPLACE`)/
+  `UNLINK`/`RENAME`, клиент `FileClient::{mkdir,create,unlink,rename}`;
+  rename — только внутри одного каталога, rmdir нет. Проверяется хост-
+  регрессией `make test-fat` (на отдельном образе, чтобы не мешать гостю)
+  и сервисом `fatwrite` в QEMU с повторным монтированием после выхода.
+  Дальше: либо миграция данных, либо переход WARP на K1FS
+- [ ] K1FS: нативная crash-safe ФС K1OS (A/B superblocks, CoW-метаданные,
+  CRC, extent, UTF-8 каталоги) для store и atomic activation WARP; проект:
+  [docs/K1FS.ru.md](docs/K1FS.ru.md)
+- [ ] K1FS-CRYPT (только opt-in): DEK + Argon2id passphrase slots, позже
+  ML-KEM recovery slots. Без hidden volumes, extraction/backdoor API и
+  механизмов обхода разблокировки; включать лишь после независимого
+  crypto-review
 - [ ] Сетевой стек целиком: IP/UDP/TCP сервисом с сокетами через IPC, DHCP и DNS
 - [x] TLS на K1K: BearSSL (в `third_party/bearssl`, MIT) собирается без ОС поверх нашей libc; `netget` в `make test` скачивает файл по HTTP и по HTTPS (TLS 1.2, ECDHE-ECDSA-AES256-GCM) с хоста, закрепляя открытый ключ сервера
 - [x] Та часть libcurl, которой пользуется WARP, нативно (`libc/curl`, заголовок `curl/curl.h`): easy-интерфейс с URL, колбэками записи и прогресса, заголовками, POST, HEAD, редиректами, таймаутами, HTTP и HTTPS поверх `net` и BearSSL, плюс `RESOLVE` (DNS по IPC) в `netproto`; `make test` проверяет GET, HTTPS, HEAD, 404 с `FAILONERROR`, редирект и колбэк прогресса. Это не сам libcurl: ему нужна почти вся POSIX
@@ -112,7 +136,12 @@
 - [ ] DNS в `make test` только пишется в лог (в CI может не быть внешнего резолвера); локальный резолвер на стороне хоста позволил бы требовать его в тесте
 - [ ] `make test-kvm` не гоняется в CI после изменений шелла, libc и сети
 - [ ] WARP 0.4.12 опубликован только для x86_64: сборки aarch64 (OrbStack на маке), Termux (android_aarch64) и macOS остались 0.4.9
-- [ ] Ссылка на raw-индекс GitVerse у WARP-репозитория `k1os` не проверена клиентом
+- [x] Ссылка на raw-индекс GitVerse у WARP-репозитория `k1os` проверена
+  (2026-11-10): анонимного raw у GitVerse нет (веб-путь отдаёт 404, Public
+  API требует токен даже для публичных репо), поэтому зеркало индекса пока
+  неработоспособно; сами `.warp` анонимно скачиваются через git-lfs
+  `info/lfs/objects/<sha256>` (sha256 совпадает с oid). Варианты — в ROADMAP
+  WARP; зеркало GitLab проверено и работает
 - [ ] Незакоммиченные правки `ci/runner/*` в K1OS относятся к раннеру другого проекта и ждут решения владельца
 - [ ] У TLS нет источника энтропии: `k1kc_entropy` берёт зерно из часов и TSC, это не стойкая случайность; драйвер virtio-rng (или RDRAND, где есть) и сервис `rng`
 - [ ] TLS пока не проверяет цепочку сертификатов: на K1K нет часов реального времени и хранилища доверенных корней, поэтому `netget` закрепляет ключ сервера; нужны часы (RTC или NTP через `net`) и пакет WARP с корневыми сертификатами
