@@ -190,6 +190,18 @@ test-fat: $(DISK) $(FAT_TEST)
 	cp $(DISK) $(BUILD)/fat-test.img
 	$(FAT_TEST) $(BUILD)/fat-test.img
 
+# K1FS slice 1 (superblock format, mkfs, A/B mount) against a scratch image.
+# Like test-fat, this never touches $(DISK): the FAT compatibility volume
+# the guest boots from stays byte-identical.
+K1FS_TEST = $(BUILD)/k1fs-test
+$(K1FS_TEST): tools/k1fs-test.rs user/svc/fs/src/k1fs.rs user/svc/fs/src/fat.rs
+	@mkdir -p $(BUILD)
+	rustc --edition=2024 -O $< -o $@
+
+test-k1fs: $(K1FS_TEST)
+	dd if=/dev/zero of=$(BUILD)/k1fs-test.img bs=1M count=4 status=none
+	$(K1FS_TEST) $(BUILD)/k1fs-test.img
+
 run: run-bios
 
 run-bios: iso $(DISK)
@@ -204,7 +216,7 @@ run-uefi: iso $(DISK)
 # few seconds and exits QEMU with status 33 (success) via isa-debug-exit.
 # The serial log must show fs mounting the disk, starting the manifest and
 # serving a real file read to a service that got no memory address of its own.
-test: test-iso $(DISK) test-fat
+test: test-iso $(DISK) test-fat test-k1fs
 	@rm -f $(BUILD)/serial.log
 	@sh tools/http-fixture.sh start $(BUILD)
 	@timeout 90 qemu-system-x86_64 -M q35 -cdrom $(TEST_ISO) -boot d \
