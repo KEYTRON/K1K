@@ -102,7 +102,10 @@
   rename — только внутри одного каталога, rmdir нет. Проверяется хост-
   регрессией `make test-fat` (на отдельном образе, чтобы не мешать гостю)
   и сервисом `fatwrite` в QEMU с повторным монтированием после выхода.
-  Дальше: либо миграция данных, либо переход WARP на K1FS
+  C-адаптер: `k1kc_mkdir/create/unlink/rename` в `user/libc-sys`, поверх них
+  `mkdir`/`unlink`/`rename` в libc с errno (EEXIST/ENOTDIR/ENOSPC), chello
+  гоняет всё это в `make test`; create с контентом — k1kc_create, у сервиса
+  нет open-for-write. Дальше: либо миграция данных, либо переход WARP на K1FS
 - [ ] K1FS: нативная crash-safe ФС K1OS (A/B superblocks, CoW-метаданные,
   CRC, extent, UTF-8 каталоги) для store и atomic activation WARP; проект:
   [docs/K1FS.ru.md](docs/K1FS.ru.md)
