@@ -12,6 +12,7 @@ members = [
     "svc/blk",
     "svc/net",
     "svc/fs",
+    "svc/fatwrite",
     "svc/sh",
     "libc-sys",
 ]

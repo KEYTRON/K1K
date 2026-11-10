@@ -151,6 +151,24 @@ fn main() -> ! {
                 };
                 let _ = send(reply, status, count, dev.block_size as u64);
             }
+            proto::WRITE => {
+                let lba = m.words[1];
+                let count = m.words[2];
+                let Some(reply) = client.reply else { continue };
+                let max = (client.buf_pages * 4096 / dev.block_size as u64).min(proto::MAX_BLOCKS);
+                if client.buf_phys == 0 || count == 0 || count > max {
+                    let _ = send(reply, proto::STATUS_ERR, 0, dev.block_size as u64);
+                    continue;
+                }
+                let status = match dev.write_phys(lba, count as u16, client.buf_phys) {
+                    Ok(()) => proto::STATUS_OK,
+                    Err(e) => {
+                        log!("write lba {} x{} failed: {:?}", lba, count, e);
+                        proto::STATUS_ERR
+                    }
+                };
+                let _ = send(reply, status, count, dev.block_size as u64);
+            }
             other => log!("unknown request {} from task {}", other, m.sender),
         }
     }

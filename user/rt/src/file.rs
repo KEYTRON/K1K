@@ -11,6 +11,9 @@ use crate::{
 /// Pages of shared memory a client registers by default: room for a path, a
 /// full [`MAX_READ`] and a directory listing.
 pub const DEFAULT_PAGES: usize = 16;
+/// Kept apart from the path and listing areas so a create request never
+/// overwrites its own file name before `fs` has parsed it.
+const CREATE_DATA_OFF: usize = DATA_OFF + MAX_PATH + 8;
 
 /// Log which half of the handshake failed and pass the error on: the codes are
 /// kernel-level and mean little without the step that produced them.
@@ -75,16 +78,16 @@ impl FileClient {
     /// Send a request block and wait for the reply. `args` are the request
     /// block words; the caller has already put any bytes it needs into the
     /// data area.
-    fn request(&self, op: u64, args: &[u64; 4], want: usize) -> Result<[u64; 4]> {
+    fn request(&self, op: u64, args: &[u64], want: usize) -> Result<[u64; 4]> {
         let buf = unsafe { view(self.base, self.len) };
-        if REQ_OFF + 32 > buf.len() {
-            return Err(Error::NoMem);
+        if args.is_empty() || args.len() * 8 > REQ_MAX || REQ_OFF + args.len() * 8 > buf.len() {
+            return Err(Error::Inval);
         }
         for (i, a) in args.iter().enumerate() {
             let off = REQ_OFF + i * 8;
             buf[off..off + 8].copy_from_slice(&a.to_le_bytes());
         }
-        send(self.listen, op, 32, want as u64)?;
+        send(self.listen, op, (args.len() * 8) as u64, want as u64)?;
         let m = recv(self.reply)?;
         if m.words[0] != OK {
             return Ok(m.words);
@@ -173,6 +176,117 @@ impl FileClient {
             size: r[1],
             is_dir: r[2] != 0,
         })
+    }
+
+    /// Create a new 8.3 regular file in the volume root.
+    ///
+    /// This is intentionally a narrow bootstrap primitive for the FAT
+    /// compatibility volume, not a general writable POSIX API: it refuses
+    /// subdirectories and an existing name. [`FileClient::create`] covers
+    /// both.
+    pub fn create_root(&self, path: &str, data: &[u8]) -> Result<()> {
+        if !path.starts_with('/') || path.len() < 2 || path[1..].contains('/') {
+            return Err(Error::Inval);
+        }
+        let path_off = self.put_path(path)?;
+        if data.len() > u32::MAX as usize || CREATE_DATA_OFF + data.len() > self.len {
+            return Err(Error::NoMem);
+        }
+        let shared = unsafe { view(self.base, self.len) };
+        shared[CREATE_DATA_OFF..CREATE_DATA_OFF + data.len()].copy_from_slice(data);
+        let r = self.request(
+            CREATE_ROOT,
+            &[
+                path_off,
+                path.len() as u64,
+                CREATE_DATA_OFF as u64,
+                data.len() as u64,
+            ],
+            0,
+        )?;
+        if r[0] != OK {
+            return Err(Error::Inval);
+        }
+        Ok(())
+    }
+
+    /// Create one subdirectory. The parent must exist and the name must be a
+    /// free 8.3 name.
+    pub fn mkdir(&self, path: &str) -> Result<()> {
+        let off = self.put_path(path)?;
+        let r = self.request(MKDIR, &[off, path.len() as u64], 0)?;
+        if r[0] != OK {
+            return Err(Error::Inval);
+        }
+        Ok(())
+    }
+
+    /// Create an 8.3 file in any existing directory. With `replace` an
+    /// existing regular file is swapped atomically — after a crash the old or
+    /// the new content is visible, never a mix; a missing name is simply
+    /// created. Without it an existing name is refused.
+    pub fn create(&self, path: &str, data: &[u8], replace: bool) -> Result<()> {
+        if !path.starts_with('/') {
+            return Err(Error::Inval);
+        }
+        let path_off = self.put_path(path)?;
+        if data.len() > u32::MAX as usize || CREATE_DATA_OFF + data.len() > self.len {
+            return Err(Error::NoMem);
+        }
+        let shared = unsafe { view(self.base, self.len) };
+        shared[CREATE_DATA_OFF..CREATE_DATA_OFF + data.len()].copy_from_slice(data);
+        let flags = if replace { CREATE_REPLACE } else { 0 };
+        let r = self.request(
+            CREATE,
+            &[
+                path_off,
+                path.len() as u64,
+                CREATE_DATA_OFF as u64,
+                data.len() as u64,
+                flags,
+            ],
+            0,
+        )?;
+        if r[0] != OK {
+            return Err(Error::Inval);
+        }
+        Ok(())
+    }
+
+    /// Remove one regular file. Directories are refused: there is no rmdir.
+    pub fn unlink(&self, path: &str) -> Result<()> {
+        let off = self.put_path(path)?;
+        let r = self.request(UNLINK, &[off, path.len() as u64], 0)?;
+        if r[0] != OK {
+            return Err(Error::Inval);
+        }
+        Ok(())
+    }
+
+    /// Rename within one directory; the new name must not exist. Moving
+    /// between directories is a create plus an unlink, not a rename.
+    pub fn rename(&self, old: &str, new: &str) -> Result<()> {
+        if !old.starts_with('/') || !new.starts_with('/') || new.len() > MAX_PATH {
+            return Err(Error::Inval);
+        }
+        let old_off = self.put_path(old)?;
+        // The second path shares the data area with create payloads; rename
+        // carries no payload, so the space is free to use.
+        let new_off = CREATE_DATA_OFF;
+        let buf = unsafe { view(self.base, self.len) };
+        let dst = buf
+            .get_mut(new_off..new_off + new.len())
+            .ok_or(Error::NoMem)?;
+        dst.copy_from_slice(new.as_bytes());
+        let r = self.request(
+            RENAME,
+            &[old_off, old.len() as u64, new_off as u64, new.len() as u64],
+            0,
+        )?;
+        if r[0] != OK {
+            return Err(Error::Inval);
+        }
+        Ok(())
     }
 
     /// List a directory into `out`, returning how many entries were written.

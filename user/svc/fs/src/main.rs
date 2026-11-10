@@ -72,6 +72,26 @@ impl BlockDevice for Blk {
         }
         Ok(())
     }
+
+    fn write(&mut self, lba: u64, count: usize, data: &[u8]) -> Result<(), ()> {
+        if data.len() < count * 512 {
+            return Err(());
+        }
+        let mut done = 0usize;
+        while done < count {
+            let n = (count - done).min(proto::MAX_BLOCKS as usize);
+            unsafe {
+                core::ptr::copy_nonoverlapping(data[done * 512..].as_ptr(), self.buf, n * 512);
+            }
+            send(BLK, proto::WRITE, lba + done as u64, n as u64).map_err(|_| ())?;
+            let m = recv(self.reply).map_err(|_| ())?;
+            if m.words[0] != proto::STATUS_OK {
+                return Err(());
+            }
+            done += n;
+        }
+        Ok(())
+    }
 }
 
 fn fail(msg: &str, code: i64) -> ! {

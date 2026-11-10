@@ -23,6 +23,7 @@ const CQE_SIZE: usize = 16;
 const OPC_ADMIN_CREATE_IO_SQ: u8 = 0x01;
 const OPC_ADMIN_CREATE_IO_CQ: u8 = 0x05;
 const OPC_ADMIN_IDENTIFY: u8 = 0x06;
+const OPC_IO_WRITE: u8 = 0x01;
 const OPC_IO_READ: u8 = 0x02;
 
 pub struct DmaPage {
@@ -287,12 +288,22 @@ impl Nvme {
     /// at `phys`. Two PRP entries cover up to 8 KiB, so `count * block_size`
     /// must not exceed that.
     pub fn read_phys(&mut self, lba: u64, count: u16, phys: u64) -> Result<(), NvmeError> {
+        self.rw_phys(OPC_IO_READ, lba, count, phys)
+    }
+
+    /// Write count blocks from physically contiguous memory at phys.
+    /// The PRP shape and size limit deliberately match Self::read_phys.
+    pub fn write_phys(&mut self, lba: u64, count: u16, phys: u64) -> Result<(), NvmeError> {
+        self.rw_phys(OPC_IO_WRITE, lba, count, phys)
+    }
+
+    fn rw_phys(&mut self, opcode: u8, lba: u64, count: u16, phys: u64) -> Result<(), NvmeError> {
         let bytes = count as u64 * self.block_size as u64;
         if bytes == 0 || bytes > 8192 {
             return Err(NvmeError::NotReady);
         }
         let mut cmd = [0u32; 16];
-        cmd[0] = OPC_IO_READ as u32;
+        cmd[0] = opcode as u32;
         cmd[1] = 1; // NSID
         cmd[6] = phys as u32;
         cmd[7] = (phys >> 32) as u32;

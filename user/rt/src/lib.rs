@@ -138,11 +138,17 @@ pub mod blkproto {
     pub const SET_REPLY: u64 = 2;
     /// Client → blk: read `w2` blocks starting at LBA `w1` into the buffer.
     pub const READ: u64 = 3;
+    /// Client → blk: write w2 blocks from the registered buffer at LBA w1.
+    ///
+    /// Only services that received the block endpoint can issue this. At
+    /// present that is fs, which exposes a deliberately narrow FAT16 create
+    /// primitive while K1FS is being built.
+    pub const WRITE: u64 = 4;
     /// blk → client: w0 = status (0 = ok), w1 = blocks transferred,
     /// w2 = block size in bytes.
     pub const STATUS_OK: u64 = 0;
     pub const STATUS_ERR: u64 = 1;
-    /// Largest single read, in blocks of 512 bytes (two PRP entries).
+    /// Largest single transfer, in blocks of 512 bytes (two PRP entries).
     pub const MAX_BLOCKS: u64 = 16;
 }
 

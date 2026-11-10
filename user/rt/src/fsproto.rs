@@ -43,6 +43,28 @@ pub const LIST: u64 = 6;
 pub const CLOSE: u64 = 7;
 /// The client is going away; the server drops its state.
 pub const BYE: u64 = 8;
+/// Request block `[path_off, path_len, data_off, data_len]`. This deliberately
+/// creates only a root-level FAT16 8.3 file; new code uses [`CREATE`], which
+/// covers subdirectories and replacement.
+pub const CREATE_ROOT: u64 = 9;
+/// Request block `[path_off, path_len, data_off, data_len, flags]`. Creates an
+/// 8.3 file in any existing directory; `flags` bit [`CREATE_REPLACE`] turns
+/// the call into an atomic replace of an existing regular file (after a crash
+/// the old or the new content is visible, never a mix). Without the flag an
+/// existing name fails with [`EXISTS`].
+pub const CREATE: u64 = 10;
+/// `CREATE` flag: replace an existing regular file instead of failing.
+pub const CREATE_REPLACE: u64 = 1;
+/// Request block `[path_off, path_len]`. Creates one subdirectory (8.3 name).
+pub const MKDIR: u64 = 11;
+/// Request block `[path_off, path_len]`. Removes one regular file; the name
+/// disappears before the cluster chain is released, so a crash can only leak
+/// space. Directories are refused.
+pub const UNLINK: u64 = 12;
+/// Request block `[old_off, old_len, new_off, new_len]`. Renames within one
+/// directory; the new name must not exist. Moving between directories is a
+/// create plus an unlink, not a rename.
+pub const RENAME: u64 = 13;
 
 /// Reply status codes, in `w0`. Anything but [`OK`] leaves `w1`/`w2` unset.
 pub const OK: u64 = 0;
@@ -52,9 +74,12 @@ pub const NOTDIR: u64 = 3;
 pub const BADF: u64 = 4;
 pub const IO: u64 = 5;
 pub const INVAL: u64 = 6;
+/// No space: the client's buffer is too small, or the disk is full.
 pub const NOSPC: u64 = 7;
 pub const TOOBIG: u64 = 8;
 pub const NOCONN: u64 = 9;
+/// The name already exists (create without replace, mkdir, rename target).
+pub const EXISTS: u64 = 10;
 
 /// Bytes one directory listing record occupies: the 8.3 name, the attribute
 /// byte and the size.
@@ -121,9 +146,10 @@ pub fn status_name(code: u64) -> &'static str {
         BADF => "bad file handle",
         IO => "i/o error",
         INVAL => "invalid request",
-        NOSPC => "buffer too small",
+        NOSPC => "no space",
         TOOBIG => "request too large",
         NOCONN => "not connected",
+        EXISTS => "already exists",
         _ => "unknown status",
     }
 }
