@@ -449,5 +449,161 @@ fn main() {
     );
     println!("k1fs: shared data block is an alias: ok");
 
-    println!("k1fs: all superblock, allocator and metadata checks passed");
+    // 16. Mutations on a fresh volume: create files and directories, each a
+    //     full commit, surviving remounts.
+    K1fs::mkfs(&mut disk, blocks).expect("mkfs for mutation tests");
+    let mut fs = K1fs::mount(&mut disk, blocks).expect("mount for mutations");
+    fs.init_root(&mut disk).expect("init root");
+    fs.create_file(&mut disk, "/A.TXT", b"hello, mutations")
+        .expect("create A.TXT");
+    fs.mkdir(&mut disk, "/DOC").expect("mkdir DOC");
+    fs.create_file(&mut disk, "/DOC/B.TXT", b"nested content")
+        .expect("create DOC/B.TXT");
+    let fs = K1fs::mount(&mut disk, blocks).expect("remount mutations");
+    let f = fs.lookup(&mut disk, "/A.TXT").expect("A.TXT resolves");
+    let mut buf = [0u8; 16];
+    fs.read_file(&mut disk, &f, 0, &mut buf)
+        .expect("read A.TXT");
+    assert_eq!(&buf, b"hello, mutations");
+    let nested = fs.lookup(&mut disk, "/DOC/B.TXT").expect("nested resolves");
+    assert_eq!(nested.size, 14);
+    println!("k1fs: create/mkdir survive a remount: ok");
+
+    // 17. Refusals: duplicates, missing parents, files as directories,
+    //     unlinked names.
+    let mut fs = fs;
+    assert!(
+        matches!(
+            fs.create_file(&mut disk, "/A.TXT", b"x"),
+            Err(K1fsErr::Exists)
+        ),
+        "duplicate create is Exists"
+    );
+    assert!(
+        matches!(
+            fs.create_file(&mut disk, "/LOST/C.TXT", b"x"),
+            Err(K1fsErr::NoEnt)
+        ),
+        "a missing parent is NoEnt"
+    );
+    assert!(
+        matches!(fs.mkdir(&mut disk, "/A.TXT/D"), Err(K1fsErr::NotDir)),
+        "a file is not a directory"
+    );
+    assert!(
+        matches!(fs.unlink(&mut disk, "/DOC"), Err(K1fsErr::IsDir)),
+        "unlink refuses directories"
+    );
+    assert!(
+        matches!(fs.unlink(&mut disk, "/NOPE"), Err(K1fsErr::NoEnt)),
+        "unlink of a missing name is NoEnt"
+    );
+    println!("k1fs: mutation refusals: ok");
+
+    // 18. unlink removes the name; the blocks of the old version become free
+    //     space again with the commit.
+    fs.unlink(&mut disk, "/A.TXT").expect("unlink A.TXT");
+    assert!(
+        matches!(fs.lookup(&mut disk, "/A.TXT"), Err(K1fsErr::NoEnt)),
+        "unlinked name is gone"
+    );
+    let fs = K1fs::mount(&mut disk, blocks).expect("remount after unlink");
+    assert!(
+        matches!(fs.lookup(&mut disk, "/A.TXT"), Err(K1fsErr::NoEnt)),
+        "unlink survives the remount"
+    );
+    let root_dir = fs.lookup(&mut disk, "/").expect("lookup /");
+    let listing = fs.list_dir(&mut disk, &root_dir).expect("list /");
+    assert_eq!(listing.len(), 1, "only DOC remains");
+    println!("k1fs: unlink frees the name: ok");
+
+    // 19. rename within a directory, including onto an existing file (the
+    //     WARP activation shape: name stays, target swaps, old blocks freed).
+    let mut fs = fs;
+    fs.rename(&mut disk, "/DOC/B.TXT", "/DOC/C.TXT")
+        .expect("rename B to C");
+    assert!(matches!(
+        fs.lookup(&mut disk, "/DOC/B.TXT"),
+        Err(K1fsErr::NoEnt)
+    ));
+    let c = fs.lookup(&mut disk, "/DOC/C.TXT").expect("C resolves");
+    assert_eq!(c.size, 14, "rename keeps the inode");
+    fs.create_file(&mut disk, "/DOC/D.TXT", b"replace me")
+        .expect("create D");
+    fs.rename(&mut disk, "/DOC/C.TXT", "/DOC/D.TXT")
+        .expect("rename onto D");
+    assert!(matches!(
+        fs.lookup(&mut disk, "/DOC/C.TXT"),
+        Err(K1fsErr::NoEnt)
+    ));
+    let d = fs.lookup(&mut disk, "/DOC/D.TXT").expect("D resolves");
+    assert_eq!(d.size, 14, "overwrite swapped the target, not the name");
+    let mut content = [0u8; 14];
+    fs.read_file(&mut disk, &d, 0, &mut content)
+        .expect("read overwritten D");
+    assert_eq!(&content, b"nested content");
+    fs.create_file(&mut disk, "/E.TXT", b"occupied")
+        .expect("create E");
+    assert!(
+        matches!(fs.rename(&mut disk, "/DOC", "/E.TXT"), Err(K1fsErr::IsDir)),
+        "a directory refuses to be renamed onto an existing name"
+    );
+    assert!(
+        matches!(fs.rename(&mut disk, "/E.TXT", "/DOC"), Err(K1fsErr::IsDir)),
+        "a file refuses to be renamed onto a directory"
+    );
+    let fs = K1fs::mount(&mut disk, blocks).expect("remount after renames");
+    let doc = fs.lookup(&mut disk, "/DOC").expect("DOC survives");
+    let listing = fs.list_dir(&mut disk, &doc).expect("list DOC");
+    assert_eq!(listing.len(), 1, "only D.TXT remains in DOC");
+    println!("k1fs: rename and overwrite survive a remount: ok");
+
+    // 20. A large file exercises data extents and the EXT chain: 1 MiB of
+    //     patterned data is 256 blocks - more extents than an inode holds.
+    let mut fs = fs;
+    let big: Vec<u8> = (0..(1024 * 1024)).map(|n| (n / 4096) as u8).collect();
+    fs.create_file(&mut disk, "/BIG.BIN", &big)
+        .expect("create BIG.BIN");
+    let fs = K1fs::mount(&mut disk, blocks).expect("remount with BIG.BIN");
+    let f = fs.lookup(&mut disk, "/BIG.BIN").expect("BIG.BIN resolves");
+    assert_eq!(f.size, 1024 * 1024);
+    for (offset, expect) in [
+        (0usize, 0u8),
+        (4096, 1),
+        (4096 * 100, 100),
+        (1024 * 1024 - 1, 255),
+    ] {
+        let mut sample = [0u8; 1];
+        fs.read_file(&mut disk, &f, offset as u64, &mut sample)
+            .expect("sample BIG.BIN");
+        assert_eq!(sample[0], expect, "byte at {offset}");
+    }
+    let mut sample = [0u8; 64];
+    fs.read_file(&mut disk, &f, 4096 * 128 + 100, &mut sample)
+        .expect("read across extents");
+    assert_eq!(sample[0], 128, "cross-extent read");
+    println!("k1fs: 1 MiB file through EXT chain round-trips: ok");
+
+    // 21. NoSpc is decided before anything is written: a full volume refuses
+    //     the create and mounts unchanged afterwards.
+    K1fs::mkfs(&mut disk, k1fs::MIN_BLOCKS).expect("mkfs tiny volume");
+    let mut tiny = K1fs::mount(&mut disk, blocks).expect("mount tiny");
+    tiny.init_root(&mut disk).expect("tiny root");
+    let generation_before = tiny.sb.generation;
+    let payload = [0u8; k1fs::BLOCK * 8];
+    assert!(
+        matches!(
+            tiny.create_file(&mut disk, "/BIG", &payload),
+            Err(K1fsErr::NoSpc)
+        ),
+        "a create that does not fit is NoSpc"
+    );
+    let tiny = K1fs::mount(&mut disk, blocks).expect("tiny remounts untouched");
+    assert_eq!(
+        tiny.sb.generation, generation_before,
+        "NoSpc leaves no trace"
+    );
+    println!("k1fs: NoSpc is decided before any write: ok");
+
+    println!("k1fs: all superblock, allocator, metadata and mutation checks passed");
 }

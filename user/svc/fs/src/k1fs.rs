@@ -1,13 +1,12 @@
 //! K1FS: the native crash-safe file system of K1OS.
 //!
-//! Slices 1-3 are here: the on-disk format, mkfs, A/B superblock mount, the
-//! pure copy-on-write allocator, and the read-only path — mount scans and
-//! validates the whole reachable tree, paths resolve through sorted directory
-//! pages, files read back through inline data or extents (with the EXT chain
-//! and holes). What is deliberately not here yet: the mutation operations
-//! (create/unlink/rename as commit sequences), the block-level FLUSH that
-//! makes a superblock publish durable on hardware, the ring-3 service and the
-//! fs protocol extensions, and everything crypto (K1FS-CRYPT).
+//! Slices 1-4 are here: the on-disk format, mkfs, A/B superblock mount, the
+//! pure copy-on-write allocator, the read-only path, and the mutation
+//! operations - create, mkdir, unlink and same-directory rename, each a full
+//! commit sequence. What is deliberately not here yet: the block-level FLUSH
+//! that makes a superblock publish durable on hardware, cross-directory
+//! rename, the ring-3 service and the fs protocol extensions, and everything
+//! crypto (K1FS-CRYPT).
 //!
 //! The design (docs/K1FS.ru.md) promises: A/B superblocks with generation and
 //! CRC, copy-on-write metadata, and a mount that picks the newest *valid*
@@ -151,6 +150,10 @@ pub enum K1fsErr {
     NoEnt,
     /// A path component that must be a directory is not one.
     NotDir,
+    /// The name already exists in the directory being created in.
+    Exists,
+    /// The operation refuses directories (no rmdir in v1).
+    IsDir,
 }
 
 /// The decoded superblock header: everything mount needs to choose a root.
@@ -187,6 +190,7 @@ pub struct K1fs {
     pub sb: Superblock,
     pub slot: u8,
     used: Vec<u64>,
+    used_count: u64,
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -363,9 +367,11 @@ impl K1fs {
             sb,
             slot,
             used: vec![0u64; ((sb.total_blocks + 63) / 64) as usize],
+            used_count: 0,
         };
         fs.set_used(SLOT_A_BLOCK);
         fs.set_used(SLOT_B_BLOCK);
+        fs.used_count = 2;
         if sb.root_block != ROOT_NONE {
             if sb.root_block < FIRST_DATA_BLOCK || sb.root_block >= sb.total_blocks {
                 return Err(K1fsErr::Inval);
@@ -373,6 +379,13 @@ impl K1fs {
             fs.scan(dev)?;
         }
         Ok(fs)
+    }
+
+    /// Blocks not handed out. Mutation sequences check their whole estimate
+    /// against this before writing anything (NoSpc is decided up front, never
+    /// mid-commit).
+    pub fn free_count(&self) -> u64 {
+        self.sb.total_blocks - self.used_count
     }
 
     /// Claim `block` for the mounted state; a block claimed twice is
@@ -386,6 +399,7 @@ impl K1fs {
             return Err(K1fsErr::Alias(block));
         }
         self.set_used(block);
+        self.used_count += 1;
         Ok(())
     }
 
@@ -480,6 +494,7 @@ impl K1fs {
         for block in FIRST_DATA_BLOCK..self.sb.total_blocks {
             if !self.is_used_bit(block) {
                 self.set_used(block);
+                self.used_count += 1;
                 return Ok(block);
             }
         }
@@ -489,8 +504,9 @@ impl K1fs {
     /// Return a data block to the pool. Only meaningful before the commit
     /// that drops the last reference; freeing a slot block is refused.
     pub fn free(&mut self, block: u64) {
-        if block >= FIRST_DATA_BLOCK && block < self.sb.total_blocks {
+        if block >= FIRST_DATA_BLOCK && block < self.sb.total_blocks && self.is_used_bit(block) {
             self.used[(block / 64) as usize] &= !(1u64 << (block % 64));
+            self.used_count -= 1;
         }
     }
 
@@ -912,11 +928,7 @@ impl K1fs {
             // entry's inode block.
             current = entry.target;
         }
-        let inode = self.read_inode(dev, current)?;
-        if components.len() > 1 && !inode.is_dir() {
-            return Err(K1fsErr::NotDir);
-        }
-        Ok(inode)
+        Ok(self.read_inode(dev, current)?)
     }
 
     /// Read a directory's page chain into entries.
@@ -1027,5 +1039,407 @@ impl K1fs {
             }
         }
         Ok(extents)
+    }
+}
+
+/// Serialize an EXT block: `next` chain head plus up to EXT_EXTENTS entries.
+fn ext_encode(self_block: u64, generation: u64, next: u64, extents: &[Extent]) -> [u8; BLOCK] {
+    let mut raw = [0u8; BLOCK];
+    put_u64le(&mut raw, META_HDR, next);
+    put_u32le(&mut raw, META_HDR + 8, extents.len() as u32);
+    for (i, extent) in extents.iter().enumerate() {
+        write_extent(&mut raw[META_HDR + 16 + i * 16..], extent);
+    }
+    meta_write_header(&mut raw, T_EXT, generation, self_block);
+    raw
+}
+
+/// One level of the descent to a mutation's parent: an ancestor directory's
+/// inode block and the name it is listed under. The root is never a level -
+/// no entry points at it.
+struct Level {
+    inode_block: u64,
+    name: Vec<u8>,
+}
+
+impl K1fs {
+    /// Give an empty volume its root directory. Idempotent.
+    pub fn init_root(&mut self, dev: &mut impl BlockDevice) -> Result<(), K1fsErr> {
+        if self.sb.root_block != ROOT_NONE {
+            return Ok(());
+        }
+        if self.free_count() < 2 {
+            return Err(K1fsErr::NoSpc);
+        }
+        let block = self.alloc()?;
+        let raw = Inode::empty_dir().encode(block, self.sb.generation + 1);
+        write_block(dev, block, &raw)?;
+        self.commit(dev, block)
+    }
+
+    fn check_name(name: &[u8]) -> Result<(), K1fsErr> {
+        if name.is_empty()
+            || name.len() > NAME_MAX
+            || name == b"."
+            || name == b".."
+            || name.contains(&b'/')
+        {
+            return Err(K1fsErr::Inval);
+        }
+        Ok(())
+    }
+
+    /// Walk `path` down to its parent, returning the ancestor levels, the
+    /// parent's inode block and the leaf name.
+    fn descend(
+        &self,
+        dev: &mut impl BlockDevice,
+        path: &str,
+    ) -> Result<(Vec<Level>, u64, Vec<u8>), K1fsErr> {
+        let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        let (leaf, parents) = components.split_last().ok_or(K1fsErr::Inval)?;
+        Self::check_name(leaf.as_bytes())?;
+        if self.sb.root_block == ROOT_NONE {
+            return Err(K1fsErr::NoEnt);
+        }
+        let mut levels = Vec::new();
+        let mut current = self.sb.root_block;
+        for component in parents {
+            let inode = self.read_inode(dev, current)?;
+            if !inode.is_dir() {
+                return Err(K1fsErr::NotDir);
+            }
+            let entries = self.list_dir(dev, &inode)?;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name.as_slice() == component.as_bytes())
+                .ok_or(K1fsErr::NoEnt)?;
+            levels.push(Level {
+                inode_block: current,
+                name: component.as_bytes().to_vec(),
+            });
+            current = entry.target;
+        }
+        Ok((levels, current, leaf.as_bytes().to_vec()))
+    }
+
+    fn parent_dir(
+        &self,
+        dev: &mut impl BlockDevice,
+        parent_block: u64,
+    ) -> Result<(Inode, Vec<DirEntry>), K1fsErr> {
+        let inode = self.read_inode(dev, parent_block)?;
+        if !inode.is_dir() {
+            return Err(K1fsErr::NotDir);
+        }
+        let entries = self.list_dir(dev, &inode)?;
+        Ok((inode, entries))
+    }
+
+    /// Pack entries into a fresh page chain, allocate and write it, and
+    /// return (first page, page count). An empty directory has no pages.
+    fn write_dir_chain(
+        &mut self,
+        dev: &mut impl BlockDevice,
+        entries: &[DirEntry],
+    ) -> Result<(u64, u64), K1fsErr> {
+        if entries.is_empty() {
+            return Ok((ROOT_NONE, 0));
+        }
+        let mut pages: Vec<Vec<DirEntry>> = vec![Vec::new()];
+        let mut off = DIR_BODY;
+        for entry in entries {
+            let len = entry_len(entry);
+            if off + len > BLOCK && !pages.last().map_or(true, |page| page.is_empty()) {
+                pages.push(Vec::new());
+                off = DIR_BODY;
+            }
+            pages.last_mut().expect("a page exists").push(entry.clone());
+            off += len;
+        }
+        let generation = self.sb.generation + 1;
+        let mut blocks = Vec::with_capacity(pages.len());
+        for _ in &pages {
+            blocks.push(self.alloc()?);
+        }
+        for (i, page_entries) in pages.iter().enumerate() {
+            let next = if i + 1 < blocks.len() {
+                blocks[i + 1]
+            } else {
+                ROOT_NONE
+            };
+            let page = DirPage {
+                next,
+                entries: page_entries.clone(),
+            };
+            let raw = page.encode(blocks[i], generation)?;
+            write_block(dev, blocks[i], &raw)?;
+        }
+        Ok((blocks[0], blocks.len() as u64))
+    }
+
+    /// The CoW heart of every mutation: write the parent's new page chain and
+    /// inode, then walk the ancestor levels rewriting the entry that points at
+    /// the renamed inode block, level by level, up to the root. Nothing
+    /// reachable is ever written; the returned block becomes the root the
+    /// caller commits. Children first, parents after, superblock last.
+    fn restitch(
+        &mut self,
+        dev: &mut impl BlockDevice,
+        levels: &[Level],
+        parent_block: u64,
+        parent: &Inode,
+        entries: Vec<DirEntry>,
+    ) -> Result<u64, K1fsErr> {
+        let generation = self.sb.generation + 1;
+        let (first, pages) = self.write_dir_chain(dev, &entries)?;
+        let mut inode = parent.clone();
+        inode.dir_first = first;
+        inode.dir_pages = pages;
+        inode.size = entries.len() as u64;
+        let mut new_block = self.alloc()?;
+        write_block(dev, new_block, &inode.encode(new_block, generation))?;
+        let mut old_child = parent_block;
+        for level in levels.iter().rev() {
+            let ancestor = self.read_inode(dev, level.inode_block)?;
+            let mut ancestor_entries = self.list_dir(dev, &ancestor)?;
+            let entry = ancestor_entries
+                .iter_mut()
+                .find(|entry| entry.target == old_child)
+                .ok_or(K1fsErr::Corrupt(level.inode_block))?;
+            entry.target = new_block;
+            let (first, pages) = self.write_dir_chain(dev, &ancestor_entries)?;
+            let mut ancestor_inode = ancestor.clone();
+            ancestor_inode.dir_first = first;
+            ancestor_inode.dir_pages = pages;
+            ancestor_inode.size = ancestor_entries.len() as u64;
+            let ancestor_block = self.alloc()?;
+            write_block(
+                dev,
+                ancestor_block,
+                &ancestor_inode.encode(ancestor_block, generation),
+            )?;
+            old_child = level.inode_block;
+            new_block = ancestor_block;
+        }
+        Ok(new_block)
+    }
+
+    /// Reserve the blocks a mutation may touch; NoSpc is decided here, before
+    /// anything is written. The estimate is deliberately slack (six blocks per
+    /// directory level: page chain, inode, ancestors' pages and inodes).
+    fn reserve(&self, levels: usize, data_blocks: usize) -> Result<(), K1fsErr> {
+        let estimate = data_blocks as u64 + 2 + 6 * (levels as u64 + 1);
+        if self.free_count() < estimate {
+            return Err(K1fsErr::NoSpc);
+        }
+        Ok(())
+    }
+
+    fn write_data(
+        &mut self,
+        dev: &mut impl BlockDevice,
+        data: &[u8],
+    ) -> Result<(Vec<Extent>, u64), K1fsErr> {
+        let generation = self.sb.generation + 1;
+        let mut extents: Vec<Extent> = Vec::new();
+        let mut written = 0usize;
+        while written < data.len() {
+            let block = self.alloc()?;
+            let mut raw = [0u8; BLOCK];
+            let end = (written + BLOCK).min(data.len());
+            raw[..end - written].copy_from_slice(&data[written..end]);
+            write_block(dev, block, &raw)?;
+            if let Some(last) = extents.last_mut() {
+                if !last.hole && last.lba + last.nblocks as u64 == block {
+                    last.nblocks += 1;
+                    written = end;
+                    continue;
+                }
+            }
+            extents.push(Extent {
+                lba: block,
+                nblocks: 1,
+                hole: false,
+            });
+            written = end;
+        }
+        let mut overflow = ROOT_NONE;
+        if extents.len() > INODE_EXTENTS {
+            let tail = extents.split_off(INODE_EXTENTS);
+            let chunks: Vec<&[Extent]> = tail.chunks(EXT_EXTENTS).collect();
+            let mut chain: Vec<u64> = Vec::with_capacity(chunks.len());
+            for _ in &chunks {
+                chain.push(self.alloc()?);
+            }
+            for (i, chunk) in chunks.iter().enumerate() {
+                let next = if i + 1 < chain.len() {
+                    chain[i + 1]
+                } else {
+                    ROOT_NONE
+                };
+                let raw = ext_encode(chain[i], generation, next, chunk);
+                write_block(dev, chain[i], &raw)?;
+            }
+            overflow = chain[0];
+        }
+        Ok((extents, overflow))
+    }
+
+    /// Create a regular file with its whole content, as one commit: data
+    /// blocks, the inode, the parent's new page chain, every ancestor up to
+    /// the root, then the other superblock slot.
+    pub fn create_file(
+        &mut self,
+        dev: &mut impl BlockDevice,
+        path: &str,
+        data: &[u8],
+    ) -> Result<(), K1fsErr> {
+        let (levels, parent_block, leaf) = self.descend(dev, path)?;
+        let (parent, entries) = self.parent_dir(dev, parent_block)?;
+        if entries.iter().any(|entry| entry.name == leaf) {
+            return Err(K1fsErr::Exists);
+        }
+        let data_blocks = if data.len() > INLINE_MAX {
+            (data.len() + BLOCK - 1) / BLOCK
+        } else {
+            0
+        };
+        self.reserve(levels.len(), data_blocks)?;
+        let generation = self.sb.generation + 1;
+        let child = if data.len() <= INLINE_MAX {
+            Inode::file(data)?
+        } else {
+            let (extents, overflow) = self.write_data(dev, data)?;
+            Inode {
+                mode: MODE_REG,
+                size: data.len() as u64,
+                inline: Vec::new(),
+                extents,
+                ext_overflow: overflow,
+                dir_first: ROOT_NONE,
+                dir_pages: 0,
+            }
+        };
+        let child_block = self.alloc()?;
+        write_block(dev, child_block, &child.encode(child_block, generation))?;
+        let mut new_entries = entries;
+        new_entries.push(DirEntry {
+            name: leaf,
+            kind: 1,
+            target: child_block,
+        });
+        let new_root = self.restitch(dev, &levels, parent_block, &parent, new_entries)?;
+        self.commit(dev, new_root)
+    }
+
+    /// Create an empty directory, same commit sequence as create_file.
+    pub fn mkdir(&mut self, dev: &mut impl BlockDevice, path: &str) -> Result<(), K1fsErr> {
+        let (levels, parent_block, leaf) = self.descend(dev, path)?;
+        let (parent, entries) = self.parent_dir(dev, parent_block)?;
+        if entries.iter().any(|entry| entry.name == leaf) {
+            return Err(K1fsErr::Exists);
+        }
+        self.reserve(levels.len(), 0)?;
+        let generation = self.sb.generation + 1;
+        let child_block = self.alloc()?;
+        write_block(
+            dev,
+            child_block,
+            &Inode::empty_dir().encode(child_block, generation),
+        )?;
+        let mut new_entries = entries;
+        new_entries.push(DirEntry {
+            name: leaf,
+            kind: 2,
+            target: child_block,
+        });
+        let new_root = self.restitch(dev, &levels, parent_block, &parent, new_entries)?;
+        self.commit(dev, new_root)
+    }
+
+    /// Remove a regular file. The inode and its data blocks are not touched:
+    /// they stop being reachable and become free space with the commit.
+    /// Directories are refused (there is no rmdir in v1).
+    pub fn unlink(&mut self, dev: &mut impl BlockDevice, path: &str) -> Result<(), K1fsErr> {
+        let (levels, parent_block, leaf) = self.descend(dev, path)?;
+        let (parent, entries) = self.parent_dir(dev, parent_block)?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == leaf)
+            .ok_or(K1fsErr::NoEnt)?;
+        if entry.kind == 2 {
+            return Err(K1fsErr::IsDir);
+        }
+        self.reserve(levels.len(), 0)?;
+        let remaining: Vec<DirEntry> = entries
+            .into_iter()
+            .filter(|entry| entry.name != leaf)
+            .collect();
+        let new_root = self.restitch(dev, &levels, parent_block, &parent, remaining)?;
+        self.commit(dev, new_root)
+    }
+
+    /// Rename within one directory, as one commit. Renaming onto an existing
+    /// file replaces it (its blocks become free space); onto a directory, or
+    /// a directory onto anything, is refused. Moving between directories is
+    /// the atomic-ops slice.
+    pub fn rename(
+        &mut self,
+        dev: &mut impl BlockDevice,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<(), K1fsErr> {
+        let (olevels, oparent_block, oleaf) = self.descend(dev, old_path)?;
+        let (nlevels, nparent_block, nleaf) = self.descend(dev, new_path)?;
+        if oparent_block != nparent_block || olevels.len() != nlevels.len() {
+            return Err(K1fsErr::Inval);
+        }
+        let (parent, entries) = self.parent_dir(dev, oparent_block)?;
+        let old_entry = entries
+            .iter()
+            .find(|entry| entry.name == oleaf)
+            .ok_or(K1fsErr::NoEnt)?;
+        if oleaf == nleaf {
+            return Ok(());
+        }
+        let old = DirEntry {
+            name: oleaf.clone(),
+            kind: old_entry.kind,
+            target: old_entry.target,
+        };
+        let replacement = entries
+            .iter()
+            .find(|entry| entry.name == nleaf)
+            .map(|entry| entry.kind);
+        if replacement == Some(2) || (old.kind == 2 && replacement.is_some()) {
+            // Mixed-type overwrite is refused either way: a directory onto
+            // an existing name, or anything onto a directory.
+            return Err(K1fsErr::IsDir);
+        }
+        let _ = &olevels;
+        self.reserve(olevels.len(), 0)?;
+        let mut new_entries: Vec<DirEntry> = entries
+            .into_iter()
+            .filter(|entry| entry.name != oleaf)
+            .collect();
+        match replacement {
+            Some(_) => {
+                // Overwrite: the name stays, the target is swapped. This is
+                // the WARP package-activation primitive.
+                let entry = new_entries
+                    .iter_mut()
+                    .find(|entry| entry.name == nleaf)
+                    .expect("the replacement survived the filter");
+                entry.target = old.target;
+            }
+            None => new_entries.push(DirEntry {
+                name: nleaf,
+                kind: old.kind,
+                target: old.target,
+            }),
+        }
+        let new_root = self.restitch(dev, &olevels, oparent_block, &parent, new_entries)?;
+        self.commit(dev, new_root)
     }
 }
