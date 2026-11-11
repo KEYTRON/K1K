@@ -530,9 +530,15 @@ impl K1fs {
             total_blocks: self.sb.total_blocks,
             log_block_size: self.sb.log_block_size,
         };
+        // The publish protocol: everything written for this commit becomes
+        // durable first, then the other slot lands, then the barrier again -
+        // a crash on either side of the slot write leaves the previous slot
+        // authoritative.
+        dev.flush().map_err(|_| K1fsErr::Io)?;
         let mut raw = [0u8; BLOCK];
         sb.encode(&mut raw);
         write_block(dev, slot_block, &raw)?;
+        dev.flush().map_err(|_| K1fsErr::Io)?;
         self.sb = sb;
         self.slot = slot;
         Ok(())

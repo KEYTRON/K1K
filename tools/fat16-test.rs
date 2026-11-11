@@ -35,6 +35,10 @@ impl fat::BlockDevice for Disk {
         self.0.write_all(&data[..bytes]).map_err(|_| ())?;
         self.0.flush().map_err(|_| ())
     }
+
+    fn flush(&mut self) -> Result<(), ()> {
+        self.0.sync_data().map_err(|_| ())
+    }
 }
 
 fn main() {
@@ -118,8 +122,12 @@ fn main() {
         remount.mkdir(&mut disk, 0, "DIR1").is_err(),
         "duplicate mkdir refused"
     );
-    let pa: Vec<u8> = (0..777).map(|n| (n as u8).wrapping_mul(29).wrapping_add(7)).collect();
-    let pb: Vec<u8> = (0..1301).map(|n| (n as u8).wrapping_mul(31).wrapping_add(3)).collect();
+    let pa: Vec<u8> = (0..777)
+        .map(|n| (n as u8).wrapping_mul(29).wrapping_add(7))
+        .collect();
+    let pb: Vec<u8> = (0..1301)
+        .map(|n| (n as u8).wrapping_mul(31).wrapping_add(3))
+        .collect();
     let created = remount
         .create_file(&mut disk, dir.cluster, "FILE.TXT", &pa, false)
         .expect("create in subdirectory");

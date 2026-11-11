@@ -169,6 +169,17 @@ fn main() -> ! {
                 };
                 let _ = send(reply, status, count, dev.block_size as u64);
             }
+            proto::FLUSH => {
+                let Some(reply) = client.reply else { continue };
+                let status = match dev.flush() {
+                    Ok(()) => proto::STATUS_OK,
+                    Err(e) => {
+                        log!("flush failed: {:?}", e);
+                        proto::STATUS_ERR
+                    }
+                };
+                let _ = send(reply, status, 0, dev.block_size as u64);
+            }
             other => log!("unknown request {} from task {}", other, m.sender),
         }
     }

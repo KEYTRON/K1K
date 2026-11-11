@@ -144,6 +144,10 @@ pub mod blkproto {
     /// present that is fs, which exposes a deliberately narrow FAT16 create
     /// primitive while K1FS is being built.
     pub const WRITE: u64 = 4;
+    /// Client → blk: flush the device's volatile write cache. Replies when
+    /// everything submitted before it is durable - the barrier a K1FS
+    /// commit publishes through. No arguments, no data.
+    pub const FLUSH: u64 = 5;
     /// blk → client: w0 = status (0 = ok), w1 = blocks transferred,
     /// w2 = block size in bytes.
     pub const STATUS_OK: u64 = 0;

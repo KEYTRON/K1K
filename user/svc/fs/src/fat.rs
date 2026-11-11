@@ -37,6 +37,10 @@ pub trait BlockDevice {
     /// FAT16 create uses this for its mirrored table, payload and directory
     /// entry writes. Other FAT variants remain read-only for now.
     fn write(&mut self, lba: u64, count: usize, data: &[u8]) -> Result<(), ()>;
+    /// Make everything written so far durable: the barrier K1FS commits
+    /// publish through. Devices without a volatile write cache implement it
+    /// as a no-op.
+    fn flush(&mut self) -> Result<(), ()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -92,6 +92,15 @@ impl BlockDevice for Blk {
         }
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), ()> {
+        send(BLK, proto::FLUSH, 0, 0).map_err(|_| ())?;
+        let m = recv(self.reply).map_err(|_| ())?;
+        if m.words[0] != proto::STATUS_OK {
+            return Err(());
+        }
+        Ok(())
+    }
 }
 
 fn fail(msg: &str, code: i64) -> ! {
@@ -132,6 +141,15 @@ fn main() -> ! {
         fs.total_clusters,
         fs.cluster_bytes()
     );
+
+    // Probe the FLUSH path end to end: the FAT volume itself never needs it
+    // (it predates the barrier), but K1FS commits will, and a silent break
+    // here must surface at boot, not during a package activation.
+    if dev.flush().is_ok() {
+        log!("blk flush: ok");
+    } else {
+        log!("blk flush: FAILED (K1FS commits would not be safe)");
+    }
 
     // Scratch memory for directory and cluster reads (a plain shared page set).
     let scratch_cap = mem_create(SCRATCH_PAGES).unwrap_or_else(|e| fail_e("scratch", e));

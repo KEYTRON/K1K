@@ -40,6 +40,10 @@ impl fat::BlockDevice for Disk {
         self.0.write_all(&data[..bytes]).map_err(|_| ())?;
         self.0.flush().map_err(|_| ())
     }
+
+    fn flush(&mut self) -> Result<(), ()> {
+        self.0.sync_data().map_err(|_| ())
+    }
 }
 
 impl Disk {
@@ -102,7 +106,7 @@ fn main() {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(image)
+        .open(&image)
         .expect("open disk image");
     let blocks = file.metadata().expect("stat").len() / BLOCK as u64;
     assert!(blocks >= k1fs::MIN_BLOCKS, "test image too small");
@@ -605,5 +609,172 @@ fn main() {
     );
     println!("k1fs: NoSpc is decided before any write: ok");
 
+    // 22. Power cuts at every single write of a commit. The commit creates a
+    //     file in a subdirectory, so the sequence propagates through the
+    //     parent and the root. After each cut the volume must mount the old
+    //     tree exactly - the same names, the same content, the same
+    //     generation.
+    K1fs::mkfs(&mut disk, blocks).expect("mkfs for crash tests");
+    let mut fs = K1fs::mount(&mut disk, blocks).expect("mount for crash tests");
+    fs.init_root(&mut disk).expect("crash-test root");
+    fs.create_file(&mut disk, "/A.TXT", b"old")
+        .expect("seed file");
+    fs.mkdir(&mut disk, "/DOC").expect("seed dir");
+    let generation = fs.sb.generation;
+    disk.0
+        .seek(SeekFrom::Start(0))
+        .expect("rewind for snapshot");
+    let mut snapshot = Vec::new();
+    disk.0.read_to_end(&mut snapshot).expect("snapshot");
+
+    let writes = {
+        let mut cd = CountingDisk {
+            file: restore(&image, &snapshot),
+            writes: 0,
+        };
+        let mut fs = K1fs::mount(&mut cd, blocks).expect("counting mount");
+        fs.create_file(&mut cd, "/DOC/B.TXT", b"propagated")
+            .expect("counting create");
+        cd.writes
+    };
+    for cut in 0..writes {
+        let mut fd = FaultDisk {
+            file: restore(&image, &snapshot),
+            cut,
+        };
+        let mut fs = K1fs::mount(&mut fd, blocks).expect("fault mount");
+        assert!(
+            fs.create_file(&mut fd, "/DOC/B.TXT", b"propagated")
+                .is_err(),
+            "a cut at write {cut} must abort the commit"
+        );
+        expect_old_state(&image, blocks, generation);
+    }
+    println!("k1fs: power cut at every write of a commit keeps the old tree: ok ({writes} cuts)");
+
     println!("k1fs: all superblock, allocator, metadata and mutation checks passed");
+}
+
+/// A disk that dies after `cut` writes: power cuts at a chosen point of a
+/// commit. Flush models the barrier as atomic - it either completes (making
+/// everything before it durable) or the machine is off, and cutting the
+/// writes before the barrier is already covered by cutting them directly.
+/// Reads still answer: a power cut stops writes, it does not erase the disk.
+struct FaultDisk {
+    file: std::fs::File,
+    cut: usize,
+}
+
+impl fat::BlockDevice for FaultDisk {
+    fn read(&mut self, lba: u64, count: usize, out: &mut [u8]) -> Result<(), ()> {
+        let bytes = count.checked_mul(512).ok_or(())?;
+        if out.len() < bytes {
+            return Err(());
+        }
+        self.file
+            .seek(SeekFrom::Start(lba.checked_mul(512).ok_or(())?))
+            .map_err(|_| ())?;
+        self.file.read_exact(&mut out[..bytes]).map_err(|_| ())
+    }
+
+    fn write(&mut self, lba: u64, count: usize, data: &[u8]) -> Result<(), ()> {
+        if self.cut == 0 {
+            return Err(());
+        }
+        self.cut -= 1;
+        let bytes = count.checked_mul(512).ok_or(())?;
+        if data.len() < bytes {
+            return Err(());
+        }
+        self.file
+            .seek(SeekFrom::Start(lba.checked_mul(512).ok_or(())?))
+            .map_err(|_| ())?;
+        self.file.write_all(&data[..bytes]).map_err(|_| ())
+    }
+
+    fn flush(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+/// Counts writes without ever failing them.
+struct CountingDisk {
+    file: std::fs::File,
+    writes: usize,
+}
+
+impl fat::BlockDevice for CountingDisk {
+    fn read(&mut self, lba: u64, count: usize, out: &mut [u8]) -> Result<(), ()> {
+        let bytes = count.checked_mul(512).ok_or(())?;
+        if out.len() < bytes {
+            return Err(());
+        }
+        self.file
+            .seek(SeekFrom::Start(lba.checked_mul(512).ok_or(())?))
+            .map_err(|_| ())?;
+        self.file.read_exact(&mut out[..bytes]).map_err(|_| ())
+    }
+
+    fn write(&mut self, lba: u64, count: usize, data: &[u8]) -> Result<(), ()> {
+        let bytes = count.checked_mul(512).ok_or(())?;
+        if data.len() < bytes {
+            return Err(());
+        }
+        self.file
+            .seek(SeekFrom::Start(lba.checked_mul(512).ok_or(())?))
+            .map_err(|_| ())?;
+        self.file.write_all(&data[..bytes]).map_err(|_| ())?;
+        self.writes += 1;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+/// Restore the image from a snapshot taken before the mutation under test.
+fn restore(image: &str, snapshot: &[u8]) -> std::fs::File {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .expect("reopen image");
+    file.seek(SeekFrom::Start(0)).expect("rewind");
+    file.write_all(snapshot).expect("restore snapshot");
+    file.set_len(snapshot.len() as u64).expect("truncate");
+    file.seek(SeekFrom::Start(0)).expect("rewind 2");
+    file
+}
+
+/// The old tree, exactly as before the mutation, must mount and answer after
+/// a power cut at any point of the commit.
+fn expect_old_state(image: &str, blocks: u64, generation: u64) {
+    let mut disk = Disk(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(image)
+            .expect("open for check"),
+    );
+    let fs = K1fs::mount(&mut disk, blocks).expect("mount after power cut");
+    assert_eq!(
+        fs.sb.generation, generation,
+        "no cut may bump the generation"
+    );
+    let f = fs.lookup(&mut disk, "/A.TXT").expect("old file resolves");
+    let mut buf = [0u8; 3];
+    fs.read_file(&mut disk, &f, 0, &mut buf)
+        .expect("read old file");
+    assert_eq!(&buf, b"old", "old content intact");
+    let doc = fs.lookup(&mut disk, "/DOC").expect("old dir resolves");
+    assert!(
+        fs.list_dir(&mut disk, &doc)
+            .expect("list old dir")
+            .is_empty()
+    );
+    assert!(
+        matches!(fs.lookup(&mut disk, "/DOC/B.TXT"), Err(K1fsErr::NoEnt)),
+        "the new name must not exist after any cut"
+    );
 }

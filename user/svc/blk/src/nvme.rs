@@ -25,6 +25,9 @@ const OPC_ADMIN_CREATE_IO_CQ: u8 = 0x05;
 const OPC_ADMIN_IDENTIFY: u8 = 0x06;
 const OPC_IO_WRITE: u8 = 0x01;
 const OPC_IO_READ: u8 = 0x02;
+/// NVMe FLUSH: everything submitted before it is durable when it completes.
+/// K1FS commits use it as the publish barrier.
+const OPC_IO_FLUSH: u8 = 0x00;
 
 pub struct DmaPage {
     pub virt: *mut u8,
@@ -295,6 +298,17 @@ impl Nvme {
     /// The PRP shape and size limit deliberately match Self::read_phys.
     pub fn write_phys(&mut self, lba: u64, count: u16, phys: u64) -> Result<(), NvmeError> {
         self.rw_phys(OPC_IO_WRITE, lba, count, phys)
+    }
+
+    /// Flush the device's volatile write cache: all writes submitted so far
+    /// land before this completes. No data pointer, no PRP - the command is
+    /// an ordering barrier, which is exactly what a K1FS commit publishes
+    /// through.
+    pub fn flush(&mut self) -> Result<(), NvmeError> {
+        let mut cmd = [0u32; 16];
+        cmd[0] = OPC_IO_FLUSH as u32;
+        cmd[1] = 1; // NSID
+        self.submit(false, &cmd).map(|_| ())
     }
 
     fn rw_phys(&mut self, opcode: u8, lba: u64, count: u16, phys: u64) -> Result<(), NvmeError> {

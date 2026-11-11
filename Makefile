@@ -225,6 +225,7 @@ test: test-iso $(DISK) test-fat test-k1fs
 	status=$$?; sh tools/http-fixture.sh stop $(BUILD); cat $(BUILD)/serial.log; echo "qemu exit: $$status"; \
 	test $$status -eq 33 \
 		&& grep -q 'fs\] mounted' $(BUILD)/serial.log \
+		&& grep -q 'blk flush: ok' $(BUILD)/serial.log \
 		&& grep -q 'notify\] notification semantics ok' $(BUILD)/serial.log \
 		&& grep -q 'revoke\] capability revocation ok' $(BUILD)/serial.log \
 		&& grep -q 'superv\] task [0-9]* lost [0-9]* capability slot' $(BUILD)/serial.log \
